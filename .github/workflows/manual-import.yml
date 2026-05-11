@@ -1,0 +1,42 @@
+name: Manual Data Import
+
+on:
+  workflow_dispatch:
+    inputs:
+      city_name:
+        description: 'City to fetch (e.g., "Mumbai, India")'
+        required: true
+        default: 'Pune, India'
+
+jobs:
+  import-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgdal-dev libproj-dev libspatialindex-dev
+
+      - name: Install Python Dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install osmnx geopandas  # These are needed for the import script
+
+      - name: Run Import Script
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CITY_NAME: ${{ github.event.inputs.city_name }}
+        run: |
+          cd backend
+          python fetch_segments.py
+          # Optional: You can also add signals fetch here
+          python fetch_signals.py
