@@ -1,5 +1,8 @@
 import logging
+import os
 import osmnx as ox
+from dotenv import load_dotenv
+
 try:
     from .database import SessionLocal, engine
     from .models import RoadSegment
@@ -7,6 +10,8 @@ except ImportError:  # allows `python backend/fetch_segments.py`
     from database import SessionLocal, engine
     from models import RoadSegment
 from sqlalchemy import text
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
@@ -21,25 +26,42 @@ def print_progress(iteration: int, total: int, prefix: str = '', suffix: str = '
         print()
 
 
-def fetch_pune_segments():
-    # Get road network for Pune center (10km radius)
-    G = ox.graph_from_point((18.5204, 73.8567), dist=10000, network_type='drive')
+def fetch_road_segments():
+    location = os.getenv("FETCH_LOCATION", "Pune, India")
+    city_tag = os.getenv("CITY_TAG", location.split(',')[0].lower().strip())
+    
+    logging.info(f'Fetching road network for: {location}...')
+    
+    try:
+        # Try fetching by place name first
+        G = ox.graph_from_place(location, network_type='drive')
+    except Exception as e:
+        logging.warning(f"Could not fetch by place name '{location}', trying coordinates... Error: {e}")
+        # Fallback to Pune coordinates if place name fails and no specific coordinates provided
+        lat = float(os.getenv("FETCH_LAT", "18.5204"))
+        lon = float(os.getenv("FETCH_LON", "73.8567"))
+        dist = int(os.getenv("FETCH_DIST", "10000"))
+        G = ox.graph_from_point((lat, lon), dist=dist, network_type='drive')
     
     # Convert to GeoDataFrame
     gdf = ox.graph_to_gdfs(G, nodes=False)
     total_rows = len(gdf)
-    logging.info(f'Loaded {total_rows} candidate road segments from OSMnx')
+    logging.info(f'Loaded {total_rows} candidate road segments')
     
     db = SessionLocal()
     try:
         count = 0
-        max_segments = 150000  # Increased limit
+        max_segments = int(os.getenv("MAX_SEGMENTS", "150000"))
         processed = 0
         for idx, row in gdf.iterrows():
             processed += 1
-            print_progress(processed, total_rows, prefix='Processing', suffix=f'{processed}/{total_rows} rows')
+            if processed % 100 == 0:
+                print_progress(processed, total_rows, prefix='Processing', suffix=f'{processed}/{total_rows} rows')
+            
             if count >= max_segments:
+                logging.info(f"Reached max segments limit ({max_segments})")
                 break
+            
             # Create LineString from geometry
             geom = row.geometry
             if geom.geom_type == 'LineString':
@@ -70,18 +92,17 @@ def fetch_pune_segments():
                 """)
                 db.execute(query, {
                     "name": str(name), 
-                    "city": 'pune', 
+                    "city": city_tag, 
                     "wkt": wkt,
                     "lanes": lanes,
                     "highway_type": str(highway_type),
                     "oneway": str(oneway)
                 })
                 count += 1
-                logging.info(f'Inserted segment {count}: "{name}" (OSM ID {idx})')
+        
         print_progress(total_rows, total_rows, prefix='Processing', suffix=f'{total_rows}/{total_rows} rows')
-
         db.commit()
-        logging.info(f"Inserted {count} road segments")
+        logging.info(f"Successfully inserted {count} road segments for {city_tag}")
     except Exception as e:
         db.rollback()
         logging.error('Error inserting road segments', exc_info=e)
@@ -89,4 +110,4 @@ def fetch_pune_segments():
         db.close()
 
 if __name__ == "__main__":
-    fetch_pune_segments()
+    fetch_road_segments()
