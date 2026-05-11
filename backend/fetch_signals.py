@@ -12,12 +12,16 @@ from sqlalchemy import text
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
 def fetch_signals_for_city(city_query: str):
-    logging.info(f'Fetching traffic signals for "{city_query}" from OSMnx...')
+    logging.info(f'Fetching traffic signals for "{city_query}" (15km radius) from OSMnx...')
     try:
-        # Get nodes tagged as traffic_signals
+        # Get nodes tagged as traffic_signals using features_from_address for reliability
         tags = {"highway": "traffic_signals"}
-        gdf = ox.features_from_place(city_query, tags=tags)
+        gdf = ox.features_from_address(city_query, tags=tags, dist=15000)
         
+        if gdf.empty:
+            logging.info(f"No traffic signals found for {city_query} in the specified radius.")
+            return
+
         # Keep only point geometries (nodes)
         gdf = gdf[gdf.geometry.type == 'Point']
         
@@ -44,7 +48,7 @@ def fetch_signals_for_city(city_query: str):
                     logging.info(f'Inserted {count} signals...')
 
             db.commit()
-            logging.info(f"Successfully inserted {count} signals for {short_city_name}")
+            logging.info(f"Successfully inserted/updated {count} signals for {short_city_name}")
         except Exception as e:
             db.rollback()
             logging.error(f'Error saving signals for {city_query}', exc_info=e)

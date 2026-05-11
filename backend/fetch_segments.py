@@ -30,10 +30,10 @@ def print_progress(iteration: int, total: int, prefix: str = '', suffix: str = '
         print()
 
 def fetch_segments_for_city(city_query: str):
-    logging.info(f'Fetching road network for "{city_query}" from OSMnx...')
+    logging.info(f'Fetching road network for "{city_query}" (15km radius) from OSMnx...')
     try:
-        # Use graph_from_place for better accuracy with city names
-        G = ox.graph_from_place(city_query, network_type='drive', simplify=True)
+        # Use graph_from_address with a radius to be more reliable than boundary polygons
+        G = ox.graph_from_address(city_query, dist=15000, network_type='drive', simplify=True)
         
         # Convert to GeoDataFrame
         gdf = ox.graph_to_gdfs(G, nodes=False)
@@ -44,7 +44,6 @@ def fetch_segments_for_city(city_query: str):
         try:
             count = 0
             processed = 0
-            # Extract just the city name part for the DB (e.g. "Mumbai")
             short_city_name = city_query.split(',')[0].strip().lower()
 
             for idx, row in gdf.iterrows():
@@ -97,6 +96,5 @@ def fetch_segments_for_city(city_query: str):
         logging.error(f'Failed to fetch data for {city_query}: {e}')
 
 if __name__ == "__main__":
-    # Get city from environment variable or default to Pune
     target_city = os.getenv("CITY_NAME", "Pune, India")
     fetch_segments_for_city(target_city)
