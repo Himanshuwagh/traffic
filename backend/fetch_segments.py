@@ -1,8 +1,6 @@
 import logging
 import os
 import osmnx as ox
-from dotenv import load_dotenv
-
 try:
     from .database import SessionLocal, engine
     from .models import RoadSegment
@@ -11,9 +9,15 @@ except ImportError:  # allows `python backend/fetch_segments.py`
     from models import RoadSegment
 from sqlalchemy import text
 
-load_dotenv()
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+
+# Major Indian Cities for easy reference
+MAJOR_INDIAN_CITIES = [
+    "Mumbai, India", "Delhi, India", "Bangalore, India", "Hyderabad, India", 
+    "Ahmedabad, India", "Chennai, India", "Kolkata, India", "Surat, India", 
+    "Pune, India", "Jaipur, India", "Lucknow, India", "Kanpur, India", 
+    "Nagpur, India", "Indore, India", "Thane, India", "Bhopal, India"
+]
 
 def print_progress(iteration: int, total: int, prefix: str = '', suffix: str = '', length: int = 40) -> None:
     if total <= 0:
@@ -25,89 +29,74 @@ def print_progress(iteration: int, total: int, prefix: str = '', suffix: str = '
     if iteration >= total:
         print()
 
-
-def fetch_road_segments():
-    location = os.getenv("FETCH_LOCATION", "Pune, India")
-    city_tag = os.getenv("CITY_TAG", location.split(',')[0].lower().strip())
-    
-    logging.info(f'Fetching road network for: {location}...')
-    
+def fetch_segments_for_city(city_query: str):
+    logging.info(f'Fetching road network for "{city_query}" from OSMnx...')
     try:
-        # Try fetching by place name first
-        G = ox.graph_from_place(location, network_type='drive')
-    except Exception as e:
-        logging.warning(f"Could not fetch by place name '{location}', trying coordinates... Error: {e}")
-        # Fallback to Pune coordinates if place name fails and no specific coordinates provided
-        lat = float(os.getenv("FETCH_LAT", "18.5204"))
-        lon = float(os.getenv("FETCH_LON", "73.8567"))
-        dist = int(os.getenv("FETCH_DIST", "10000"))
-        G = ox.graph_from_point((lat, lon), dist=dist, network_type='drive')
-    
-    # Convert to GeoDataFrame
-    gdf = ox.graph_to_gdfs(G, nodes=False)
-    total_rows = len(gdf)
-    logging.info(f'Loaded {total_rows} candidate road segments')
-    
-    db = SessionLocal()
-    try:
-        count = 0
-        max_segments = int(os.getenv("MAX_SEGMENTS", "150000"))
-        processed = 0
-        for idx, row in gdf.iterrows():
-            processed += 1
-            if processed % 100 == 0:
-                print_progress(processed, total_rows, prefix='Processing', suffix=f'{processed}/{total_rows} rows')
-            
-            if count >= max_segments:
-                logging.info(f"Reached max segments limit ({max_segments})")
-                break
-            
-            # Create LineString from geometry
-            geom = row.geometry
-            if geom.geom_type == 'LineString':
-                # Convert to WKT format for SQL insertion
-                wkt = geom.wkt
-                name = row.get('name', 'Unknown')
-                if isinstance(name, list): name = name[0]
-                
-                # Extract infrastructure data safely
-                lanes_raw = row.get('lanes', None)
-                lanes = None
-                if lanes_raw:
-                    try:
-                        lanes = int(lanes_raw[0] if isinstance(lanes_raw, list) else lanes_raw)
-                    except:
-                        pass
-                
-                highway_raw = row.get('highway', 'Unknown')
-                highway_type = highway_raw[0] if isinstance(highway_raw, list) else highway_raw
-                
-                oneway_raw = row.get('oneway', False)
-                oneway = str(oneway_raw[0] if isinstance(oneway_raw, list) else oneway_raw)
-                
-                # Use raw SQL to insert with ST_GeomFromText and infra metadata
-                query = text("""
-                    INSERT INTO road_segments (name, city, geometry, lanes, highway_type, oneway)
-                    VALUES (:name, :city, ST_GeomFromText(:wkt, 4326), :lanes, :highway_type, :oneway)
-                """)
-                db.execute(query, {
-                    "name": str(name), 
-                    "city": city_tag, 
-                    "wkt": wkt,
-                    "lanes": lanes,
-                    "highway_type": str(highway_type),
-                    "oneway": str(oneway)
-                })
-                count += 1
+        # Use graph_from_place for better accuracy with city names
+        G = ox.graph_from_place(city_query, network_type='drive', simplify=True)
         
-        print_progress(total_rows, total_rows, prefix='Processing', suffix=f'{total_rows}/{total_rows} rows')
-        db.commit()
-        logging.info(f"Successfully inserted {count} road segments for {city_tag}")
+        # Convert to GeoDataFrame
+        gdf = ox.graph_to_gdfs(G, nodes=False)
+        total_rows = len(gdf)
+        logging.info(f'Loaded {total_rows} road segments for {city_query}')
+        
+        db = SessionLocal()
+        try:
+            count = 0
+            processed = 0
+            # Extract just the city name part for the DB (e.g. "Mumbai")
+            short_city_name = city_query.split(',')[0].strip().lower()
+
+            for idx, row in gdf.iterrows():
+                processed += 1
+                if processed % 100 == 0:
+                    print_progress(processed, total_rows, prefix='Processing', suffix=f'{processed}/{total_rows}')
+                
+                geom = row.geometry
+                if geom.geom_type == 'LineString':
+                    wkt = geom.wkt
+                    name = row.get('name', 'Unknown')
+                    if isinstance(name, list): name = name[0]
+                    
+                    lanes_raw = row.get('lanes', None)
+                    lanes = None
+                    if lanes_raw:
+                        try:
+                            lanes = int(lanes_raw[0] if isinstance(lanes_raw, list) else lanes_raw)
+                        except: pass
+                    
+                    highway_raw = row.get('highway', 'Unknown')
+                    highway_type = highway_raw[0] if isinstance(highway_raw, list) else highway_raw
+                    
+                    oneway_raw = row.get('oneway', False)
+                    oneway = str(oneway_raw[0] if isinstance(oneway_raw, list) else oneway_raw)
+                    
+                    query = text("""
+                        INSERT INTO road_segments (name, city, geometry, lanes, highway_type, oneway)
+                        VALUES (:name, :city, ST_GeomFromText(:wkt, 4326), :lanes, :highway_type, :oneway)
+                        ON CONFLICT DO NOTHING
+                    """)
+                    db.execute(query, {
+                        "name": str(name), 
+                        "city": short_city_name, 
+                        "wkt": wkt,
+                        "lanes": lanes,
+                        "highway_type": str(highway_type),
+                        "oneway": str(oneway)
+                    })
+                    count += 1
+            
+            db.commit()
+            logging.info(f"Successfully inserted/updated {count} segments for {short_city_name}")
+        except Exception as e:
+            db.rollback()
+            logging.error(f'Error saving segments for {city_query}', exc_info=e)
+        finally:
+            db.close()
     except Exception as e:
-        db.rollback()
-        logging.error('Error inserting road segments', exc_info=e)
-    finally:
-        db.close()
+        logging.error(f'Failed to fetch data for {city_query}: {e}')
 
 if __name__ == "__main__":
-    fetch_road_segments()
+    # Get city from environment variable or default to Pune
+    target_city = os.getenv("CITY_NAME", "Pune, India")
+    fetch_segments_for_city(target_city)
