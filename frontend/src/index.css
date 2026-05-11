@@ -1,0 +1,66 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-bg: #0F1117;
+  --color-brand-card: #1A1D27;
+  --color-brand-border: rgba(255, 255, 255, 0.08);
+  --color-brand-amber: #F59E0B;
+  --color-brand-emerald: #10B981;
+  
+  --color-cfi-red: #EF4444;
+  --color-cfi-orange: #F97316;
+  --color-cfi-amber: #F59E0B;
+  --color-cfi-lime: #84CC16;
+  --color-cfi-green: #10B981;
+}
+
+@layer base {
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-brand-bg text-white font-sans antialiased m-0;
+    font-family: 'Inter', sans-serif;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-brand-card border border-brand-border rounded-[12px];
+  }
+  
+  .heading-1 {
+    @apply text-[24px] font-semibold leading-tight;
+  }
+  
+  .heading-2 {
+    @apply text-[16px] font-semibold leading-tight;
+  }
+  
+  .label-text {
+    @apply text-[12px] font-normal uppercase tracking-wider text-gray-400;
+  }
+  
+  .body-text {
+    @apply text-[14px] font-normal text-gray-300;
+  }
+
+  /* Webkit Scrollbar Styling for a premium feel */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+}
