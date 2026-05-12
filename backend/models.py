@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Float
+from sqlalchemy import Column, Integer, String, DateTime, Float, Text
 from geoalchemy2 import Geometry
 try:
     from .database import Base
@@ -41,3 +41,27 @@ class WeatherData(Base):
     temperature = Column(Float)  # Celsius
     condition = Column(String)   # e.g., "Rain", "Clear", "Cloudy"
     precipitation = Column(Float) # mm
+
+
+class FetchProgress(Base):
+    """Tracks per-city status for the fetch_all_india.py batch job.
+
+    Each row = one city in one batch run.  Survives Railway restarts so you
+    can always query the DB to see what has been done.
+
+    Queryable example:
+        SELECT city, status, segments_fetched, duration_seconds
+        FROM   fetch_progress
+        ORDER  BY started_at;
+    """
+    __tablename__ = "fetch_progress"
+
+    id               = Column(Integer, primary_key=True, index=True)
+    run_id           = Column(String,  nullable=True,  index=True)   # short UUID for this batch run
+    city             = Column(String,  nullable=False, index=True)
+    status           = Column(String,  nullable=False)               # skipped | running | success | failed
+    segments_fetched = Column(Integer, nullable=True)
+    started_at       = Column(DateTime, nullable=True)
+    finished_at      = Column(DateTime, nullable=True)
+    duration_seconds = Column(Integer,  nullable=True)
+    error_message    = Column(Text,     nullable=True)
