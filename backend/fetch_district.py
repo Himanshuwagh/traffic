@@ -34,6 +34,24 @@ log = logging.getLogger(__name__)
 
 BATCH_SIZE: int = max(1, int(os.getenv("SEGMENT_INSERT_BATCH_SIZE", "500")))
 
+# ---------------------------------------------------------------------------
+# Road filter — only fetch highway types that are relevant for traffic
+# analytics.  Skipping residential/service/living_street cuts memory use by
+# 60-70% and is the right data for a traffic intelligence platform anyway.
+#
+# Override via HIGHWAY_FILTER env var, e.g.:
+#   HIGHWAY_FILTER="motorway|trunk|primary" for only major highways
+# ---------------------------------------------------------------------------
+_DEFAULT_HIGHWAY_FILTER = (
+    "motorway|motorway_link"
+    "|trunk|trunk_link"
+    "|primary|primary_link"
+    "|secondary|secondary_link"
+    "|tertiary|tertiary_link"
+)
+HIGHWAY_FILTER: str = os.getenv("HIGHWAY_FILTER", _DEFAULT_HIGHWAY_FILTER)
+OSMNX_CUSTOM_FILTER: str = f'["highway"~"{HIGHWAY_FILTER}"]'
+
 _INSERT_SQL = text("""
     INSERT INTO road_segments (name, city, geometry, lanes, highway_type, oneway)
     VALUES (:name, :city, ST_GeomFromText(:wkt, 4326), :lanes, :highway_type, :oneway)
@@ -89,10 +107,14 @@ def fetch_segments_for_district(district: str, state: str) -> bool:
     log.info('Fetching road network for "%s" from OSMnx (place boundary)…', place)
 
     # ── Step 1: Download graph from OSM ──────────────────────────────────────
+    log.info(
+        '  Highway filter : %s',
+        HIGHWAY_FILTER,
+    )
     try:
         G = ox.graph_from_place(
             place,
-            network_type="drive",
+            custom_filter=OSMNX_CUSTOM_FILTER,
             simplify=True,
             retain_all=False,
         )
