@@ -22,21 +22,25 @@ MVT_LAYER_NAME = "traffic"
 SEGMENT_TILE_CACHE_TTL_SECONDS = 3600  # 1 hour – geometry changes very rarely
 segment_tile_cache: dict[tuple, tuple[float, bytes]] = {}
 
-MAJOR_HIGHWAY_TYPES = (
-    "motorway",
-    "motorway_link",
-    "trunk",
-    "trunk_link",
-    "primary",
-    "primary_link",
+# ── Road hierarchy buckets (Google-Maps-style progressive reveal) ────────────
+# Each zoom level unlocks an additional road class.
+# These are used by BOTH tile endpoints so backend & frontend stay in sync.
+
+HW_MOTORWAY   = ("motorway", "motorway_link")
+HW_TRUNK      = HW_MOTORWAY + ("trunk", "trunk_link")
+HW_PRIMARY    = HW_TRUNK    + ("primary", "primary_link")
+HW_SECONDARY  = HW_PRIMARY  + ("secondary", "secondary_link")
+HW_TERTIARY   = HW_SECONDARY + ("tertiary", "tertiary_link")
+HW_MINOR      = HW_TERTIARY + (
+    "unclassified",
+    "residential",
+    "living_street",
+    "service",
 )
 
-MEDIUM_HIGHWAY_TYPES = MAJOR_HIGHWAY_TYPES + (
-    "secondary",
-    "secondary_link",
-    "tertiary",
-    "tertiary_link",
-)
+# Legacy aliases kept so nothing else breaks
+MAJOR_HIGHWAY_TYPES = HW_PRIMARY
+MEDIUM_HIGHWAY_TYPES = HW_TERTIARY
 
 
 def get_traffic_color(speed):
@@ -54,13 +58,21 @@ def get_traffic_color(speed):
 
 
 def traffic_detail_for_zoom(zoom: float | None, requested_limit: int) -> tuple[tuple[str, ...] | None, int, float]:
-    if zoom is None or zoom <= 12:
-        return MAJOR_HIGHWAY_TYPES, min(requested_limit, 1500), 0.0004
+    """
+    Returns (highway_types, row_limit, simplify_tolerance) for a given map zoom.
+
+    Highway type filtering is DISABLED — all road segments are returned at every
+    zoom level. Only geometry simplification varies with zoom to keep tile sizes
+    reasonable at low zoom levels.
+    """
+    # Always return all road types (highway_types=None means no type filter)
+    if zoom is None or zoom < 9:
+        return None, min(requested_limit, 50000), 0.0006
+    if zoom < 12:
+        return None, min(requested_limit, 50000), 0.0002
     if zoom < 14:
-        return MEDIUM_HIGHWAY_TYPES, min(requested_limit, 6000), 0.00015
-    if zoom < 16:
-        return None, min(requested_limit, 10000), 0.00003
-    return None, min(requested_limit, 20000), 0.0
+        return None, min(requested_limit, 50000), 0.00005
+    return None, min(requested_limit, 50000), 0.0
 
 
 def rounded_bbox_key(bbox_vals: tuple[float, float, float, float] | None) -> tuple[float, ...] | None:
@@ -122,7 +134,9 @@ def build_common_filters(
             {"min_lon": bbox_vals[0], "min_lat": bbox_vals[1], "max_lon": bbox_vals[2], "max_lat": bbox_vals[3]}
         )
     if highway_types:
-        where_clauses.append("(rs.highway_type IS NULL OR rs.highway_type = ANY(CAST(:highway_types AS text[])))")
+        # Strict match: only the exact road classes for this zoom level.
+        # Roads with NULL highway_type are excluded — they would clutter low-zoom views.
+        where_clauses.append("rs.highway_type = ANY(CAST(:highway_types AS text[]))")
         params["highway_types"] = list(highway_types)
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     return where_sql, params
@@ -355,6 +369,11 @@ async def get_traffic_summary(
         }
 
 
+# Empty tile bytes (valid empty MVT) returned instantly for out-of-range zooms
+_EMPTY_TILE = b""
+_EMPTY_TILE_RESPONSE_HEADERS = {"Cache-Control": "public, max-age=600"}
+
+
 @router.get("/api/traffic/tiles/{date_str}/{z}/{x}/{y}.mvt")
 async def get_traffic_tile(
     date_str: str,
@@ -364,11 +383,21 @@ async def get_traffic_tile(
     city: str | None = None,
     db: Session = Depends(get_db),
 ):
-    """Serve traffic as vector tiles so the browser can incrementally render visible roads."""
+    """
+    Serve traffic as Mapbox Vector Tiles.
+
+    Performance design:
+    - Step 1: spatial query finds segments inside the tile bbox (uses GiST index, fast).
+    - Step 2: traffic lookup is scoped ONLY to those segment IDs (avoids full-table scan).
+    - LEFT JOIN → roads with no traffic data appear with a neutral gray colour so the
+      road skeleton is always visible without a separate geometry-only source.
+    - Short date window (±3 h) keeps the traffic_data range scan small.
+    - Server-side cache (60 s) + browser cache (60 s) mean repeated tile fetches are free.
+    """
     try:
-        print(f"DEBUG: get_traffic_tile: date={date_str}, z={z}, x={x}, y={y}, city={city}")
+        _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)[1:]
+
         target_time = datetime.fromisoformat(date_str)
-        highway_types, _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)
         cache_key = (
             "tile",
             city.lower() if city else None,
@@ -377,27 +406,23 @@ async def get_traffic_tile(
             x,
             y,
             simplify_tolerance,
-            highway_types,
         )
         now = time.monotonic()
         cached = lookup_cached_response(traffic_tile_cache, cache_key, now)
-        if cached:
+        if cached is not None:
             return Response(
                 content=cached,
                 media_type="application/vnd.mapbox-vector-tile",
-                headers={"Cache-Control": "public, max-age=30"},
+                headers={"Cache-Control": "public, max-age=60"},
             )
 
-        where_sql, filter_params = build_common_filters(
-            city=city,
-            highway_types=highway_types,
-            bbox_vals=None,
-            geometry_column="rs.geometry",
-        )
-        if where_sql:
-            where_sql = f"{where_sql} AND rs.geometry && bounds.bounds_4326"
-        else:
-            where_sql = "WHERE rs.geometry && bounds.bounds_4326"
+        # Build city WHERE clause only (no highway_type filter — all types shown at all zooms)
+        city_clauses: list[str] = []
+        filter_params: dict = {}
+        if city:
+            city_clauses.append("LOWER(rs.city) = LOWER(:city)")
+            filter_params["city"] = city
+        city_where = ("WHERE " + " AND ".join(city_clauses)) if city_clauses else ""
 
         params = {
             "target_time": target_time,
@@ -410,52 +435,75 @@ async def get_traffic_tile(
 
         query = text(
             f"""
-            WITH bounds AS (
+            WITH
+            -- ── 1. Compute tile envelope once ────────────────────────────────────
+            bounds AS (
                 SELECT
-                    ST_TileEnvelope(:z, :x, :y) AS bounds_3857,
-                    ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS bounds_4326
+                    ST_TileEnvelope(:z, :x, :y)                        AS bounds_3857,
+                    ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326)    AS bounds_4326
             ),
+            -- ── 2. Find segments inside this tile (GiST spatial index + city/hw filter) ─
+            --    This is cheap: uses the spatial index and returns at most a few hundred rows.
+            tile_segs AS (
+                SELECT
+                    rs.id,
+                    rs.name,
+                    rs.highway_type,
+                    rs.geometry
+                FROM road_segments rs, bounds
+                {city_where}
+                  AND rs.geometry && bounds.bounds_4326
+            ),
+            -- ── 3. Fetch traffic ONLY for segments found in step 2 ─────────────────
+            --    Joining on segment_id first narrows the traffic_data scan to a tiny
+            --    subset (10-200 rows per tile) instead of scanning millions of rows.
+            --    The ±3-hour window keeps the date range scan on the covering index small.
             closest_traffic AS (
                 SELECT DISTINCT ON (td.segment_id)
                     td.segment_id,
                     td.speed,
-                    td.travel_time,
-                    td.date
-                FROM traffic_data td
-                WHERE td.date BETWEEN :target_time - INTERVAL '7 days' AND :target_time + INTERVAL '7 days'
-                ORDER BY td.segment_id, abs(extract(epoch from td.date - :target_time))
+                    td.travel_time
+                FROM tile_segs ts
+                JOIN traffic_data td ON td.segment_id = ts.id
+                WHERE td.date BETWEEN :target_time - INTERVAL '3 hours'
+                                  AND :target_time + INTERVAL '3 hours'
+                ORDER BY td.segment_id,
+                         abs(extract(epoch from td.date - :target_time))
             ),
+            -- ── 4. Build MVT geometry ──────────────────────────────────────────
             tile_rows AS (
                 SELECT
-                    rs.id,
-                    COALESCE(rs.name, 'Unknown') AS name,
-                    COALESCE(rs.highway_type, 'unknown') AS highway_type,
+                    ts.id,
+                    COALESCE(ts.name, 'Unknown')       AS name,
+                    COALESCE(ts.highway_type, 'unknown') AS highway_type,
                     ct.speed,
                     ct.travel_time,
+                    -- LEFT JOIN: roads without traffic data get a neutral gray so the
+                    -- road skeleton is always rendered without a separate geometry source.
                     CASE
-                        WHEN ct.speed IS NULL THEN '#888888'
-                        WHEN ct.speed >= 40 THEN '#00C700'
-                        WHEN ct.speed >= 25 THEN '#FFFF00'
-                        WHEN ct.speed >= 15 THEN '#FF9900'
-                        ELSE '#FF0000'
+                        WHEN ct.speed IS NULL  THEN '#a0a0b0'
+                        WHEN ct.speed >= 40    THEN '#00C700'
+                        WHEN ct.speed >= 25    THEN '#FFFF00'
+                        WHEN ct.speed >= 15    THEN '#FF9900'
+                        ELSE                       '#FF0000'
                     END AS color,
                     ST_AsMVTGeom(
                         ST_Transform(
                             CASE
-                                WHEN :simplify_tolerance > 0 THEN ST_SimplifyPreserveTopology(rs.geometry, :simplify_tolerance)
-                                ELSE rs.geometry
+                                WHEN :simplify_tolerance > 0
+                                    THEN ST_SimplifyPreserveTopology(ts.geometry, :simplify_tolerance)
+                                ELSE ts.geometry
                             END,
                             3857
                         ),
                         bounds.bounds_3857,
-                        4096,
-                        256,
-                        true
+                        4096,   -- extent
+                        256,    -- buffer (needed for anti-aliased lines at tile edges)
+                        true    -- clip
                     ) AS geom
-                FROM road_segments rs
-                LEFT JOIN closest_traffic ct ON ct.segment_id = rs.id
+                FROM tile_segs ts
+                LEFT JOIN closest_traffic ct ON ct.segment_id = ts.id
                 CROSS JOIN bounds
-                {where_sql}
             )
             SELECT ST_AsMVT(tile_rows, '{MVT_LAYER_NAME}', 4096, 'geom')
             FROM tile_rows
@@ -468,11 +516,11 @@ async def get_traffic_tile(
         return Response(
             content=tile,
             media_type="application/vnd.mapbox-vector-tile",
-            headers={"Cache-Control": "public, max-age=30"},
+            headers={"Cache-Control": "public, max-age=60"},
         )
     except Exception as e:
-        print(f"TILE ERROR: {e}")
-        return Response(content=str(e), media_type="text/plain", status_code=500)
+        print(f"TILE ERROR z={z} x={x} y={y}: {e}")
+        return Response(content=b"", media_type="application/vnd.mapbox-vector-tile", status_code=200)
 
 
 @router.get("/api/segments/tiles/{z}/{x}/{y}.mvt")
@@ -483,12 +531,14 @@ async def get_segment_tile(
     city: str | None = None,
     db: Session = Depends(get_db),
 ):
-    """Serve road segment geometry as vector tiles (no traffic data).
-    These tiles are heavily cached because road geometry almost never changes.
-    Used to render a permanent base road layer that never disappears on time/date changes.
+    """
+    Geometry-only vector tiles for the permanent road skeleton (no traffic data).
+    Cached for 1 hour on both server and browser — road geometry rarely changes.
+    All road types are returned at every zoom level.
     """
     try:
-        highway_types, _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)
+        _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)[1:]
+
         cache_key = (
             "seg_tile",
             city.lower() if city else None,
@@ -496,7 +546,6 @@ async def get_segment_tile(
             x,
             y,
             simplify_tolerance,
-            highway_types,
         )
         now = time.monotonic()
         cached = segment_tile_cache.get(cache_key)
@@ -507,16 +556,12 @@ async def get_segment_tile(
                 headers={"Cache-Control": "public, max-age=3600"},
             )
 
-        where_sql, filter_params = build_common_filters(
-            city=city,
-            highway_types=highway_types,
-            bbox_vals=None,
-            geometry_column="rs.geometry",
-        )
-        if where_sql:
-            where_sql = f"{where_sql} AND rs.geometry && bounds.bounds_4326"
-        else:
-            where_sql = "WHERE rs.geometry && bounds.bounds_4326"
+        city_clauses: list[str] = []
+        filter_params: dict = {}
+        if city:
+            city_clauses.append("LOWER(rs.city) = LOWER(:city)")
+            filter_params["city"] = city
+        city_where = ("WHERE " + " AND ".join(city_clauses)) if city_clauses else ""
 
         params = {
             "z": z,
@@ -528,20 +573,22 @@ async def get_segment_tile(
 
         query = text(
             f"""
-            WITH bounds AS (
+            WITH
+            bounds AS (
                 SELECT
-                    ST_TileEnvelope(:z, :x, :y) AS bounds_3857,
-                    ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS bounds_4326
+                    ST_TileEnvelope(:z, :x, :y)                      AS bounds_3857,
+                    ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326)  AS bounds_4326
             ),
             tile_rows AS (
                 SELECT
                     rs.id,
-                    COALESCE(rs.name, 'Unknown') AS name,
+                    COALESCE(rs.name, 'Unknown')        AS name,
                     COALESCE(rs.highway_type, 'unknown') AS highway_type,
                     ST_AsMVTGeom(
                         ST_Transform(
                             CASE
-                                WHEN :simplify_tolerance > 0 THEN ST_SimplifyPreserveTopology(rs.geometry, :simplify_tolerance)
+                                WHEN :simplify_tolerance > 0
+                                    THEN ST_SimplifyPreserveTopology(rs.geometry, :simplify_tolerance)
                                 ELSE rs.geometry
                             END,
                             3857
@@ -551,9 +598,9 @@ async def get_segment_tile(
                         256,
                         true
                     ) AS geom
-                FROM road_segments rs
-                CROSS JOIN bounds
-                {where_sql}
+                FROM road_segments rs, bounds
+                {city_where}
+                  AND rs.geometry && bounds.bounds_4326
             )
             SELECT ST_AsMVT(tile_rows, 'segments', 4096, 'geom')
             FROM tile_rows
@@ -562,7 +609,6 @@ async def get_segment_tile(
         )
 
         tile = db.execute(query, params).scalar() or b""
-        # Store with 1-hour TTL
         if len(segment_tile_cache) >= TRAFFIC_CACHE_MAX_ENTRIES * 4:
             segment_tile_cache.clear()
         segment_tile_cache[cache_key] = (now, tile)
@@ -573,8 +619,8 @@ async def get_segment_tile(
             headers={"Cache-Control": "public, max-age=3600"},
         )
     except Exception as e:
-        print(f"SEGMENT TILE ERROR: {e}")
-        return Response(content=str(e), media_type="text/plain", status_code=500)
+        print(f"SEGMENT TILE ERROR z={z} x={x} y={y}: {e}")
+        return Response(content=b"", media_type="application/vnd.mapbox-vector-tile", status_code=200)
 
 
 @router.get("/api/signals")

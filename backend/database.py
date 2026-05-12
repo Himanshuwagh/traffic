@@ -20,10 +20,18 @@ Base = declarative_base()
 
 def ensure_performance_indexes():
     index_statements = [
+        # Spatial index — primary index for tile bbox queries
         "CREATE INDEX IF NOT EXISTS idx_road_segments_geometry_gist ON road_segments USING GIST (geometry)",
+        # City filter
         "CREATE INDEX IF NOT EXISTS idx_road_segments_city_lower ON road_segments (LOWER(city))",
+        # Highway type filter (zoom-based road class filtering)
         "CREATE INDEX IF NOT EXISTS idx_road_segments_highway_type ON road_segments (highway_type)",
-        "CREATE INDEX IF NOT EXISTS idx_traffic_data_segment_date ON traffic_data (segment_id, date)",
+        # Composite: city + highway_type — used by tile queries to narrow road_segments before spatial join
+        "CREATE INDEX IF NOT EXISTS idx_road_segments_city_hw ON road_segments (LOWER(city), highway_type)",
+        # Covering index for traffic_data — segment_id + date + payload cols avoid heap fetch
+        # Used by the scoped tile query: WHERE segment_id IN (...) AND date BETWEEN ...
+        "CREATE INDEX IF NOT EXISTS idx_traffic_data_seg_date_covering ON traffic_data (segment_id, date, speed, travel_time)",
+        # Date-only index for any remaining range scans
         "CREATE INDEX IF NOT EXISTS idx_traffic_data_date ON traffic_data (date)",
         "CREATE INDEX IF NOT EXISTS idx_traffic_signals_city_lower ON traffic_signals (LOWER(city))",
         "CREATE INDEX IF NOT EXISTS idx_weather_data_city_timestamp ON weather_data (LOWER(city), timestamp)",
