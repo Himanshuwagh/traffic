@@ -85,11 +85,8 @@ const SIGNALS_LAYER_ID = "signals-layer";
 // maxzoom:14 → Mapbox overzooms z=14 tiles for camera z>14.
 // This means we never request z=15-22 tiles → fewer DB queries, better UX.
 // minzoom:6  → tiles are not requested below zoom 6 (backend returns empty anyway).
-const SOURCE_OPTS: Omit<mapboxgl.VectorSourceSpecification, "tiles"> = {
-  type: "vector",
-  minzoom: 0,
-  maxzoom: 14,
-};
+const SOURCE_MINZOOM = 0;
+const SOURCE_MAXZOOM = 14;
 
 // ─── Paint expressions ────────────────────────────────────────────────────────
 
@@ -296,7 +293,14 @@ const upsertSource = (
 ): boolean => {
   const src = m.getSource(id) as VecSource | undefined;
   if (!src) {
-    m.addSource(id, { ...SOURCE_OPTS, tiles: [tileUrl] });
+    const sourceSpec: mapboxgl.VectorSourceSpecification = {
+      type: "vector",
+      tiles: [tileUrl],
+      minzoom: SOURCE_MINZOOM,
+      maxzoom: SOURCE_MAXZOOM,
+    };
+
+    m.addSource(id, sourceSpec);
     return true; // newly added — caller must add layers
   }
   if (typeof src.setTiles === "function") {

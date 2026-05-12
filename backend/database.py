@@ -1,7 +1,9 @@
 from sqlalchemy import create_engine
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+import logging
 import os
 from dotenv import load_dotenv
 
@@ -17,8 +19,19 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
+logger = logging.getLogger(__name__)
 
-import logging
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def should_ensure_performance_indexes() -> bool:
+    return _env_flag("AUTO_CREATE_INDEXES", default=False)
+
 
 def ensure_performance_indexes():
     # Split heavy index statements that must run CONCURRENTLY from the
@@ -45,10 +58,18 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_weather_data_city_timestamp ON weather_data (LOWER(city), timestamp)",
     ]
 
-    # Run the lightweight index statements inside a transaction
-    with engine.begin() as connection:
-        for statement in tx_statements:
-            connection.execute(text(statement))
+    if not should_ensure_performance_indexes():
+        logger.info("Skipping startup index creation; set AUTO_CREATE_INDEXES=true to enable it.")
+        return
+
+    # Run the lightweight index statements individually so a timeout on one
+    # index does not prevent the application from starting.
+    for statement in tx_statements:
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(statement))
+        except SQLAlchemyError as exc:
+            logger.warning("Failed to create transactional index during startup: %s | sql=%s", exc, statement)
 
     # Run the concurrent statements outside a transaction (Postgres requires
     # CONCURRENTLY to not be executed inside a transaction block).
@@ -56,9 +77,9 @@ def ensure_performance_indexes():
         try:
             with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 conn.execute(text(statement))
-        except Exception as exc:
+        except SQLAlchemyError as exc:
             # Log a warning but don't fail the entire startup.
-            logging.warning(f"Failed to create concurrent index; will retry later: {exc}")
+            logger.warning("Failed to create concurrent index during startup: %s | sql=%s", exc, statement)
 
 def get_db():
     db = SessionLocal()

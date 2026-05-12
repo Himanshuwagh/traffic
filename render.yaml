@@ -13,3 +13,5 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      - key: AUTO_CREATE_INDEXES
+        value: "false"
