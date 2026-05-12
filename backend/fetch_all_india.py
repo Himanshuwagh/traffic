@@ -218,13 +218,17 @@ def _record_progress(
 
 
 def _get_processed_cities() -> set[str]:
-    """Return set of city short-names already present in road_segments."""
+    """Return set of city short-names that finished successfully in any run."""
     db = SessionLocal()
     try:
-        rows = db.execute(text("SELECT DISTINCT city FROM road_segments")).fetchall()
+        rows = db.execute(text("""
+            SELECT DISTINCT city
+            FROM fetch_progress
+            WHERE status = 'success'
+        """)).fetchall()
         return {row[0].lower() for row in rows if row[0]}
     except Exception as exc:
-        log.warning(f"Could not query road_segments (DB may be empty): {exc}")
+        log.warning(f"Could not query fetch_progress (table may be empty): {exc}")
         return set()
     finally:
         db.close()
@@ -296,9 +300,9 @@ def main() -> None:
     already_done  = [c for c in ALL_INDIA_CITIES if _short_name(c) in processed_set]
     remaining     = [c for c in ALL_INDIA_CITIES if _short_name(c) not in processed_set]
 
-    log.info(f"  Total cities    : {len(ALL_INDIA_CITIES)}")
-    log.info(f"  Already in DB   : {len(already_done)}")
-    log.info(f"  To process now  : {len(remaining)}")
+    log.info(f"  Total cities          : {len(ALL_INDIA_CITIES)}")
+    log.info(f"  Already successful    : {len(already_done)}")
+    log.info(f"  To process now        : {len(remaining)}")
     log.info(LINE)
 
     # Record already-done cities in the progress table for this run
@@ -306,7 +310,7 @@ def main() -> None:
         seg_count = _get_city_segment_count(_short_name(city))
         _record_progress(run_id, _short_name(city), "skipped", segments=seg_count)
         log.info(f"  ⏭   Skipping {_short_name(city):<25} "
-                 f"(already has {seg_count:,} segments in DB)")
+                 f"(already marked successful with {seg_count:,} segments in DB)")
 
     if not remaining:
         log.info("✅  All cities already processed. Nothing to do.")
