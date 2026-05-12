@@ -11,11 +11,14 @@ import { apiUrl } from '../lib/api';
 const Explore: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const cityParam = searchParams.get('city') || 'bengaluru';
+  const dateParam = searchParams.get('date') || new Date().toISOString().split('T')[0];
+  const timeParam = Number(searchParams.get('hour'));
+  const initialTimeHour = Number.isInteger(timeParam) && timeParam >= 0 && timeParam <= 23 ? timeParam : 8;
   
   const [selectedCityId, setSelectedCityId] = useState(cityParam);
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
-  const [timeHour, setTimeHour] = useState<number>(8);
-  const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [timeHour, setTimeHour] = useState<number>(initialTimeHour);
+  const [selectedDate, setSelectedDate] = useState<string>(dateParam);
   const [showToast, setShowToast] = useState(false);
   
   const [weather, setWeather] = useState<{ condition: string; temperature: number; precipitation: number } | null>(null);
@@ -32,8 +35,15 @@ const Explore: React.FC = () => {
     const newCity = e.target.value;
     setSelectedCityId(newCity);
     setSelectedSegmentId(null);
-    setSearchParams({ city: newCity });
   };
+
+  React.useEffect(() => {
+    setSearchParams({
+      city: selectedCityId,
+      date: selectedDate,
+      hour: String(timeHour),
+    }, { replace: true });
+  }, [selectedCityId, selectedDate, timeHour, setSearchParams]);
 
   const city = useMemo(() => cities.find(c => c.id === selectedCityId) || cities[0], [selectedCityId]);
   const selectedSegment = useMemo(() => segments.find(s => s.id === selectedSegmentId), [selectedSegmentId]);

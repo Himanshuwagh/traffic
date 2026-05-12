@@ -19,6 +19,9 @@ traffic_summary_cache: dict[tuple, tuple[float, dict]] = {}
 traffic_tile_cache: dict[tuple, tuple[float, bytes]] = {}
 MVT_LAYER_NAME = "traffic"
 
+SEGMENT_TILE_CACHE_TTL_SECONDS = 3600  # 1 hour – geometry changes very rarely
+segment_tile_cache: dict[tuple, tuple[float, bytes]] = {}
+
 MAJOR_HIGHWAY_TYPES = (
     "motorway",
     "motorway_link",
@@ -218,7 +221,7 @@ async def get_traffic_by_date(
             )::text AS geojson
             FROM features
         """
-        
+
         query = text(base_query)
         geojson = db.execute(query, params).scalar() or '{"type":"FeatureCollection","features":[]}'
         store_cached_response(traffic_response_cache, cache_key, geojson, now)
@@ -238,6 +241,7 @@ async def get_traffic_summary(
 ):
     """Return lightweight metrics for the visible viewport without geometry payloads."""
     try:
+        print(f"DEBUG: get_traffic_summary: date={date_str}, city={city}, zoom={zoom}, bbox={bbox}")
         target_time = datetime.fromisoformat(date_str)
         bbox_vals = parse_bbox(bbox)
         highway_types, limit, _ = traffic_detail_for_zoom(zoom, limit)
@@ -362,6 +366,7 @@ async def get_traffic_tile(
 ):
     """Serve traffic as vector tiles so the browser can incrementally render visible roads."""
     try:
+        print(f"DEBUG: get_traffic_tile: date={date_str}, z={z}, x={x}, y={y}, city={city}")
         target_time = datetime.fromisoformat(date_str)
         highway_types, _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)
         cache_key = (
@@ -448,7 +453,7 @@ async def get_traffic_tile(
                         true
                     ) AS geom
                 FROM road_segments rs
-                JOIN closest_traffic ct ON ct.segment_id = rs.id
+                LEFT JOIN closest_traffic ct ON ct.segment_id = rs.id
                 CROSS JOIN bounds
                 {where_sql}
             )
@@ -466,7 +471,111 @@ async def get_traffic_tile(
             headers={"Cache-Control": "public, max-age=30"},
         )
     except Exception as e:
+        print(f"TILE ERROR: {e}")
         return Response(content=str(e), media_type="text/plain", status_code=500)
+
+
+@router.get("/api/segments/tiles/{z}/{x}/{y}.mvt")
+async def get_segment_tile(
+    z: int,
+    x: int,
+    y: int,
+    city: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Serve road segment geometry as vector tiles (no traffic data).
+    These tiles are heavily cached because road geometry almost never changes.
+    Used to render a permanent base road layer that never disappears on time/date changes.
+    """
+    try:
+        highway_types, _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)
+        cache_key = (
+            "seg_tile",
+            city.lower() if city else None,
+            z,
+            x,
+            y,
+            simplify_tolerance,
+            highway_types,
+        )
+        now = time.monotonic()
+        cached = segment_tile_cache.get(cache_key)
+        if cached and now - cached[0] <= SEGMENT_TILE_CACHE_TTL_SECONDS:
+            return Response(
+                content=cached[1],
+                media_type="application/vnd.mapbox-vector-tile",
+                headers={"Cache-Control": "public, max-age=3600"},
+            )
+
+        where_sql, filter_params = build_common_filters(
+            city=city,
+            highway_types=highway_types,
+            bbox_vals=None,
+            geometry_column="rs.geometry",
+        )
+        if where_sql:
+            where_sql = f"{where_sql} AND rs.geometry && bounds.bounds_4326"
+        else:
+            where_sql = "WHERE rs.geometry && bounds.bounds_4326"
+
+        params = {
+            "z": z,
+            "x": x,
+            "y": y,
+            "simplify_tolerance": simplify_tolerance,
+            **filter_params,
+        }
+
+        query = text(
+            f"""
+            WITH bounds AS (
+                SELECT
+                    ST_TileEnvelope(:z, :x, :y) AS bounds_3857,
+                    ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS bounds_4326
+            ),
+            tile_rows AS (
+                SELECT
+                    rs.id,
+                    COALESCE(rs.name, 'Unknown') AS name,
+                    COALESCE(rs.highway_type, 'unknown') AS highway_type,
+                    ST_AsMVTGeom(
+                        ST_Transform(
+                            CASE
+                                WHEN :simplify_tolerance > 0 THEN ST_SimplifyPreserveTopology(rs.geometry, :simplify_tolerance)
+                                ELSE rs.geometry
+                            END,
+                            3857
+                        ),
+                        bounds.bounds_3857,
+                        4096,
+                        256,
+                        true
+                    ) AS geom
+                FROM road_segments rs
+                CROSS JOIN bounds
+                {where_sql}
+            )
+            SELECT ST_AsMVT(tile_rows, 'segments', 4096, 'geom')
+            FROM tile_rows
+            WHERE geom IS NOT NULL
+            """
+        )
+
+        tile = db.execute(query, params).scalar() or b""
+        # Store with 1-hour TTL
+        if len(segment_tile_cache) >= TRAFFIC_CACHE_MAX_ENTRIES * 4:
+            segment_tile_cache.clear()
+        segment_tile_cache[cache_key] = (now, tile)
+
+        return Response(
+            content=tile,
+            media_type="application/vnd.mapbox-vector-tile",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+    except Exception as e:
+        print(f"SEGMENT TILE ERROR: {e}")
+        return Response(content=str(e), media_type="text/plain", status_code=500)
+
 
 @router.get("/api/signals")
 async def get_traffic_signals(city: str | None = None, db: Session = Depends(get_db)):
@@ -478,22 +587,22 @@ async def get_traffic_signals(city: str | None = None, db: Session = Depends(get
                 ST_AsGeoJSON(geometry)::text as geometry
             FROM traffic_signals
         """
-        
+
         params = {}
         if city:
             base_query += " WHERE LOWER(city) = LOWER(:city)"
             params["city"] = city
-            
+
         query = text(base_query)
         results = db.execute(query, params).fetchall()
-        
+
         features = []
         for row in results:
             try:
                 geometry = json.loads(row.geometry) if row.geometry else None
             except Exception:
                 geometry = None
-                
+
             if geometry:
                 feature = {
                     "type": "Feature",
@@ -504,7 +613,7 @@ async def get_traffic_signals(city: str | None = None, db: Session = Depends(get
                     }
                 }
                 features.append(feature)
-        
+
         return {"type": "FeatureCollection", "features": features}
     except Exception as e:
         return {"error": str(e), "type": "FeatureCollection", "features": []}
@@ -514,18 +623,18 @@ async def get_weather(date_str: str, city: str, db: Session = Depends(get_db)):
     """Get closest weather data for a city at a specific time."""
     try:
         target_time = datetime.fromisoformat(date_str)
-        
+
         # Find the single closest weather record
         query = text("""
-            SELECT temperature, condition, precipitation 
-            FROM weather_data 
+            SELECT temperature, condition, precipitation
+            FROM weather_data
             WHERE LOWER(city) = LOWER(:city)
-            ORDER BY abs(extract(epoch from timestamp - :target_time)) 
+            ORDER BY abs(extract(epoch from timestamp - :target_time))
             LIMIT 1
         """)
-        
+
         result = db.execute(query, {"city": city, "target_time": target_time}).fetchone()
-        
+
         if result:
             return {
                 "temperature": result.temperature,
