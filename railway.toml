@@ -3,8 +3,10 @@ builder        = "DOCKERFILE"
 dockerfilePath = "Dockerfile.fetcher"
 
 [deploy]
-# This is a one-shot batch job, not a web service.
-# Never restart after the script finishes.
+# Explicitly set the start command so Railway never falls back to its
+# auto-detected "uvicorn main:app" command.
+startCommand      = "python fetch_all_india.py"
+# This is a one-shot batch job — never restart after the script finishes.
 restartPolicyType = "NEVER"
 # No healthcheck — this is not an HTTP server.
-healthcheckPath = ""
+healthcheckPath   = ""
