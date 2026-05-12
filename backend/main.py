@@ -19,11 +19,13 @@ ensure_performance_indexes()
 
 app = FastAPI(title="Traffic Intelligence API", version="1.0.0")
 
-allowed_origins = [
-    origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
-    if origin.strip()
-]
+allowed_origins_raw = os.getenv("ALLOWED_ORIGINS", "")
+if allowed_origins_raw:
+    allowed_origins = [origin.strip() for origin in allowed_origins_raw.split(",") if origin.strip()]
+else:
+    # Fallback to allow all for easier initial cloud deployment, 
+    # but still include localhost for development.
+    allowed_origins = ["*"]
 
 # Enable CORS for frontend
 app.add_middleware(
