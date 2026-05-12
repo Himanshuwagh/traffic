@@ -1,8 +1,10 @@
 [build]
-builder       = "DOCKERFILE"
+builder        = "DOCKERFILE"
 dockerfilePath = "Dockerfile.fetcher"
 
 [deploy]
-# The script exits when all cities are processed; we do NOT want Railway to
-# restart it automatically.
+# This is a one-shot batch job, not a web service.
+# Never restart after the script finishes.
 restartPolicyType = "NEVER"
+# No healthcheck — this is not an HTTP server.
+healthcheckPath = ""
