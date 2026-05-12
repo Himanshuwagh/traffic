@@ -1,0 +1,8 @@
+[build]
+builder       = "DOCKERFILE"
+dockerfilePath = "Dockerfile.fetcher"
+
+[deploy]
+# The script exits when all cities are processed; we do NOT want Railway to
+# restart it automatically.
+restartPolicyType = "NEVER"

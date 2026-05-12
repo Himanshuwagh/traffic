@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+# libspatialindex-dev is required by Rtree, which osmnx uses for spatial
+# indexing.  geopandas / fiona / GDAL wheels are downloaded from PyPI so we
+# do not need a full GDAL apt installation.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libspatialindex-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy requirements files first so Docker can cache the pip-install layer
+# independently of source-code changes.
+COPY backend/requirements.txt backend/requirements-fetcher.txt ./
+
+RUN pip install --no-cache-dir -r requirements-fetcher.txt
+
+# Copy the rest of the backend source
+COPY backend/ ./
+
+CMD ["python", "fetch_all_india.py"]
