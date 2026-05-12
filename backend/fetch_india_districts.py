@@ -17,8 +17,8 @@ Progress tracking:
 State filtering (horizontal scale-out):
     Set the STATE_FILTER env var to a comma-separated list of state names to
     limit which states this instance will process.  For example:
-
-        STATE_FILTER="Maharashtra,Karnataka,Tamil Nadu" python fetch_india_districts.py
+/ 
+        STATE_FILTER="A" python fetch_india_districts.py
 
     Run multiple Railway deploys in parallel, each with a different
     STATE_FILTER, to process all 766 districts concurrently across deploys.
