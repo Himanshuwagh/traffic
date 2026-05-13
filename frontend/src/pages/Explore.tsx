@@ -257,6 +257,10 @@ const Explore: React.FC = () => {
             city={city}
             summary={trafficSummary}
             onSegmentClick={setSelectedSegmentId}
+            onFetchComplete={() => {
+              // Nudge the map to reload by toggling the date string (force re-render)
+              setSelectedDate(prev => prev);
+            }}
           />
         )}
       </div>

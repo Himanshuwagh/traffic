@@ -141,6 +141,114 @@ def build_common_filters(
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     return where_sql, params
 
+@router.post("/api/traffic/fetch")
+async def trigger_traffic_fetch(
+    city: str | None = Query(default=None, description="City to fetch (omit for all)"),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """
+    Trigger a real-time TomTom traffic data fetch and store results in traffic_data.
+    Runs synchronously — response contains fetch stats.
+    """
+    try:
+        try:
+            from .fetch_tomtom import fetch_traffic_tomtom
+        except ImportError:
+            from fetch_tomtom import fetch_traffic_tomtom
+        result = fetch_traffic_tomtom(city=city, limit=limit)
+        return result
+    except Exception as e:
+        return {"error": str(e), "fetched": 0, "failed": 0}
+
+
+@router.get("/api/traffic/hourly")
+async def get_hourly_speed_profile(
+    city: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Return average speed bucketed by hour-of-day across all stored traffic_data.
+    Used for the CityOverview hourly bar chart.
+    """
+    try:
+        params: dict = {}
+        city_clause = ""
+        if city:
+            city_clause = "AND LOWER(rs.city) = LOWER(:city)"
+            params["city"] = city
+
+        rows = db.execute(
+            text(f"""
+                SELECT
+                    EXTRACT(HOUR FROM td.date)::int AS hour_of_day,
+                    ROUND(AVG(td.speed)::numeric, 1) AS avg_speed,
+                    COUNT(*) AS count
+                FROM traffic_data td
+                JOIN road_segments rs ON rs.id = td.segment_id
+                WHERE td.speed IS NOT NULL
+                {city_clause}
+                GROUP BY hour_of_day
+                ORDER BY hour_of_day
+            """),
+            params,
+        ).fetchall()
+
+        bucket: dict[int, dict] = {r.hour_of_day: {"avg_speed": float(r.avg_speed), "count": int(r.count)} for r in rows}
+        result = []
+        for h in range(24):
+            label = f"{h:02d}:00"
+            if h in bucket:
+                result.append({"hour": label, "avg_speed": bucket[h]["avg_speed"], "count": bucket[h]["count"]})
+            else:
+                result.append({"hour": label, "avg_speed": None, "count": 0})
+
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/api/traffic/latest")
+async def get_latest_traffic_stats(
+    city: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Return stats about the most recent traffic data in the DB."""
+    try:
+        params: dict = {}
+        city_clause = ""
+        if city:
+            city_clause = "AND LOWER(rs.city) = LOWER(:city)"
+            params["city"] = city
+
+        result = db.execute(
+            text(f"""
+                SELECT
+                    COUNT(*) AS total_records,
+                    MAX(td.date) AS latest_snapshot,
+                    MIN(td.date) AS earliest_snapshot,
+                    COUNT(DISTINCT td.segment_id) AS unique_segments,
+                    ROUND(AVG(td.speed)::numeric, 1) AS avg_speed
+                FROM traffic_data td
+                JOIN road_segments rs ON rs.id = td.segment_id
+                WHERE 1=1 {city_clause}
+            """),
+            params,
+        ).fetchone()
+
+        if result:
+            return {
+                "total_records": result.total_records,
+                "latest_snapshot": result.latest_snapshot.isoformat() if result.latest_snapshot else None,
+                "earliest_snapshot": result.earliest_snapshot.isoformat() if result.earliest_snapshot else None,
+                "unique_segments": result.unique_segments,
+                "avg_speed": result.avg_speed,
+                "city": city or "all",
+            }
+        return {"total_records": 0, "city": city or "all"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @router.get("/api/traffic/{date_str}")
 async def get_traffic_by_date(
     date_str: str,
@@ -663,6 +771,7 @@ async def get_traffic_signals(city: str | None = None, db: Session = Depends(get
         return {"type": "FeatureCollection", "features": features}
     except Exception as e:
         return {"error": str(e), "type": "FeatureCollection", "features": []}
+
 
 @router.get("/api/weather/{date_str}")
 async def get_weather(date_str: str, city: str, db: Session = Depends(get_db)):
