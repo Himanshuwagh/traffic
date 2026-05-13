@@ -10,3 +10,4 @@ node_modules/
 frontend/dist/
 backend/cache/
 road_segments.ndjson
+india-roads.pmtiles
