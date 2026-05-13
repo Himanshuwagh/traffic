@@ -11,10 +11,10 @@ const Home: React.FC = () => {
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    navigate('/explore?city=bengaluru');
+    navigate('/explore?city=pune');
   };
 
-  const cities = ['Bengaluru', 'Pune', 'Mumbai', 'Delhi', 'Hyderabad', 'Chennai'];
+  const cities = ['Pune', 'Mumbai', 'Nashik', 'Thane', 'Nagpur', 'Kolhapur'];
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center px-4 py-12 relative overflow-hidden">

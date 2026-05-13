@@ -44,11 +44,9 @@ const Explore: React.FC = () => {
     null,
   );
 
-  // Auto-select Silk Board Junction for Bengaluru demo
+  // Clear selected segment when city changes
   React.useEffect(() => {
-    if (selectedCityId === "bengaluru" && !selectedSegmentId) {
-      setSelectedSegmentId("blr-2"); // Silk Board
-    }
+    setSelectedSegmentId(null);
   }, [selectedCityId]);
 
   const handleCityChange = (e: React.ChangeEvent<HTMLSelectElement>) => {

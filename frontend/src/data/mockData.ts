@@ -27,12 +27,12 @@ export interface Segment {
 }
 
 export const cities: City[] = [
-  { id: 'bengaluru', name: 'Bengaluru', avgCFI: 63.4, peakHour: '8:45 AM', worstDay: 'Monday', totalSegments: 2450, topCorridor: 'Outer Ring Road (ORR)', center: [77.63, 12.95], zoom: 11.5 },
-  { id: 'pune', name: 'Pune', avgCFI: 58.2, peakHour: '9:15 AM', worstDay: 'Tuesday', totalSegments: 1820, topCorridor: 'Pune-Mumbai Highway', center: [73.8567, 18.5204], zoom: 12 },
-  { id: 'mumbai', name: 'Mumbai', avgCFI: 68.9, peakHour: '9:00 AM', worstDay: 'Wednesday', totalSegments: 3100, topCorridor: 'Western Express Highway', center: [72.8777, 19.0760], zoom: 11 },
-  { id: 'delhi', name: 'Delhi', avgCFI: 65.1, peakHour: '8:30 AM', worstDay: 'Monday', totalSegments: 3800, topCorridor: 'Ring Road', center: [77.1025, 28.7041], zoom: 10.5 },
-  { id: 'hyderabad', name: 'Hyderabad', avgCFI: 55.4, peakHour: '9:30 AM', worstDay: 'Thursday', totalSegments: 1650, topCorridor: 'Inner Ring Road', center: [78.4867, 17.3850], zoom: 11.5 },
-  { id: 'chennai', name: 'Chennai', avgCFI: 59.8, peakHour: '8:45 AM', worstDay: 'Friday', totalSegments: 1980, topCorridor: 'Anna Salai', center: [80.2707, 13.0827], zoom: 11.5 }
+  { id: 'pune', name: 'Pune', avgCFI: 58.2, peakHour: '9:15 AM', worstDay: 'Tuesday', totalSegments: 110960, topCorridor: 'Pune-Mumbai Highway', center: [73.8567, 18.5204], zoom: 12 },
+  { id: 'mumbai', name: 'Mumbai', avgCFI: 68.9, peakHour: '9:00 AM', worstDay: 'Wednesday', totalSegments: 62740, topCorridor: 'Western Express Highway', center: [72.8777, 19.0760], zoom: 11 },
+  { id: 'nashik', name: 'Nashik', avgCFI: 52.1, peakHour: '9:00 AM', worstDay: 'Monday', totalSegments: 11077, topCorridor: 'Mumbai-Agra Highway', center: [73.7898, 19.9975], zoom: 12 },
+  { id: 'thane', name: 'Thane', avgCFI: 61.3, peakHour: '9:15 AM', worstDay: 'Tuesday', totalSegments: 10471, topCorrider: 'Ghodbunder Road', center: [72.9781, 19.2183], zoom: 12 },
+  { id: 'nagpur', name: 'Nagpur', avgCFI: 48.7, peakHour: '9:30 AM', worstDay: 'Monday', totalSegments: 3687, topCorridor: 'Ring Road', center: [79.0882, 21.1458], zoom: 12 },
+  { id: 'kolhapur', name: 'Kolhapur', avgCFI: 45.2, peakHour: '9:00 AM', worstDay: 'Friday', totalSegments: 5030, topCorridor: 'NH-48', center: [74.2433, 16.7050], zoom: 12.5 },
 ];
 
 export const segments: Segment[] = [
