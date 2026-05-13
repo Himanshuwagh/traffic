@@ -14,12 +14,20 @@ except ImportError:
     from models import Base
     from routes import router
 
-Base.metadata.create_all(bind=engine)
+import logging
+_logger = logging.getLogger(__name__)
+
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as exc:
+    _logger.warning(
+        "Startup schema creation skipped (tables may already exist or PostGIS not available): %s", exc
+    )
+
 try:
     ensure_performance_indexes()
 except Exception as exc:
-    import logging
-    logging.getLogger(__name__).warning(
+    _logger.warning(
         "Startup index creation skipped after error: %s", exc
     )
 
