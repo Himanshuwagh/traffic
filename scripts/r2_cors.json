@@ -1,0 +1,20 @@
+[
+  {
+    "allowedOrigins": [
+      "https://*.vercel.app",
+      "http://localhost:5173",
+      "http://localhost:4173",
+      "http://localhost:3000"
+    ],
+    "allowedMethods": ["GET", "HEAD"],
+    "allowedHeaders": ["range", "if-match", "if-none-match"],
+    "exposeHeaders": [
+      "content-length",
+      "content-range",
+      "accept-ranges",
+      "etag",
+      "last-modified"
+    ],
+    "maxAgeSeconds": 86400
+  }
+]

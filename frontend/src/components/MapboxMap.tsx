@@ -39,6 +39,18 @@ mapboxgl.accessToken =
   import.meta.env.VITE_MAPBOX_TOKEN ||
   "pk.eyJ1IjoiZHVtbXl1c2VyIiwiYSI6ImNsdW1teXRva2VuIn0.dummy";
 
+// ── Tile server URL (Cloudflare Worker) ──────────────────────────────────
+// Set VITE_TILE_SERVER_URL in Vercel env vars to the deployed Worker URL
+// (e.g. https://traffic-tile-server.YOUR_NAME.workers.dev).
+// The Worker reads PMTiles from R2 and serves plain {z}/{x}/{y}.mvt URLs,
+// which Mapbox GL JS handles natively — no custom protocol needed.
+// When not set the map falls back to live MVT tiles from the Render API.
+const TILE_SERVER_URL = (
+  import.meta.env.VITE_TILE_SERVER_URL as string | undefined
+)
+  ?.trim()
+  ?.replace(/\/+$/, "");
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface MapboxMapProps {
@@ -323,7 +335,6 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
-  const loadedBaseCityRef = useRef<string>("");
   const lastSummaryKey = useRef<string>("");
 
   // ── 1. Init map once ────────────────────────────────────────────────────────
@@ -409,38 +420,70 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
       });
   }, [city, mapLoaded]);
 
-  // ── 3. BASE layer — permanent road skeleton ──────────────────────────────────
-  // Only re-triggered when city changes. Provides continuous road visibility
-  // while traffic tiles are loading (e.g. after a time-slider move).
+  // ── 3. BASE layer — road skeleton from Worker tile server or API fallback ───
+  //
+  // Worker path  (VITE_TILE_SERVER_URL is set):
+  //   • Source added ONCE when the map loads — covers all of India.
+  //   • Worker reads PMTiles from R2 and serves {z}/{x}/{y}.mvt URLs.
+  //   • Zero Render/Supabase involvement for the road skeleton.
+  //
+  // Fallback path (VITE_TILE_SERVER_URL is NOT set):
+  //   • Behaves exactly as before — live MVT tiles from /api/segments/tiles.
+  //   • upsertSource / setTiles() called on every city change.
   useEffect(() => {
     if (!map.current || !mapLoaded) return;
 
-    const tileUrl = apiUrl(
-      `/api/segments/tiles/{z}/{x}/{y}.mvt?city=${encodeURIComponent(cityId)}`,
-    );
+    const existingSrc = map.current.getSource(BASE_SOURCE_ID) as
+      | VecSource
+      | undefined;
 
-    const isNew = upsertSource(map.current, BASE_SOURCE_ID, tileUrl);
+    if (TILE_SERVER_URL) {
+      // ── Cloudflare Worker tile server: wire up once, covers all India ──────
+      // Source already exists → nothing to do on city change
+      if (existingSrc) return;
 
-    if (isNew) {
-      // BASE visual layer — subtle dark gray skeleton, always visible
-      map.current.addLayer({
-        id: BASE_LAYER_ID,
-        type: "line",
-        source: BASE_SOURCE_ID,
-        "source-layer": BASE_SOURCE_LAYER,
-        minzoom: 0,
-        layout: { "line-cap": "round", "line-join": "round" },
-        paint: {
-          "line-color": "#8a8a9a",
-          "line-width": LINE_WIDTH,
-          "line-opacity": 0.9,
-        },
+      map.current.addSource(BASE_SOURCE_ID, {
+        type: "vector",
+        // Worker serves standard {z}/{x}/{y}.mvt URLs — Mapbox GL JS handles
+        // these natively. No custom protocol or library changes needed.
+        tiles: [`${TILE_SERVER_URL}/tiles/{z}/{x}/{y}.mvt`],
+        minzoom: SOURCE_MINZOOM,
+        maxzoom: SOURCE_MAXZOOM,
       });
-    } else if (loadedBaseCityRef.current !== cityId) {
-      // City switched — setTiles() already called by upsertSource; nothing else to do.
+    } else {
+      // ── Fallback: live MVT tiles from Render API (original behaviour) ───────
+      const fallbackUrl = apiUrl(
+        `/api/segments/tiles/{z}/{x}/{y}.mvt?city=${encodeURIComponent(cityId)}`,
+      );
+      if (existingSrc) {
+        // City changed — swap the tile URL; source + layer already exist
+        if (typeof existingSrc.setTiles === "function")
+          existingSrc.setTiles([fallbackUrl]);
+        return;
+      }
+      map.current.addSource(BASE_SOURCE_ID, {
+        type: "vector",
+        tiles: [fallbackUrl],
+        minzoom: SOURCE_MINZOOM,
+        maxzoom: SOURCE_MAXZOOM,
+      });
     }
 
-    loadedBaseCityRef.current = cityId;
+    // Reached only when the source was just created (both paths)
+    map.current.addLayer({
+      id: BASE_LAYER_ID,
+      type: "line",
+      source: BASE_SOURCE_ID,
+      // "segments" must match tippecanoe --layer=segments in generate_pmtiles.sh
+      "source-layer": BASE_SOURCE_LAYER,
+      minzoom: 0,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: {
+        "line-color": "#8a8a9a",
+        "line-width": LINE_WIDTH,
+        "line-opacity": 0.9,
+      },
+    });
   }, [cityId, mapLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 4. TRAFFIC layer — coloured overlay, updated on time/date/city change ───
