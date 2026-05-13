@@ -30,7 +30,7 @@ export const cities: City[] = [
   { id: 'pune', name: 'Pune', avgCFI: 58.2, peakHour: '9:15 AM', worstDay: 'Tuesday', totalSegments: 110960, topCorridor: 'Pune-Mumbai Highway', center: [73.8567, 18.5204], zoom: 12 },
   { id: 'mumbai', name: 'Mumbai', avgCFI: 68.9, peakHour: '9:00 AM', worstDay: 'Wednesday', totalSegments: 62740, topCorridor: 'Western Express Highway', center: [72.8777, 19.0760], zoom: 11 },
   { id: 'nashik', name: 'Nashik', avgCFI: 52.1, peakHour: '9:00 AM', worstDay: 'Monday', totalSegments: 11077, topCorridor: 'Mumbai-Agra Highway', center: [73.7898, 19.9975], zoom: 12 },
-  { id: 'thane', name: 'Thane', avgCFI: 61.3, peakHour: '9:15 AM', worstDay: 'Tuesday', totalSegments: 10471, topCorrider: 'Ghodbunder Road', center: [72.9781, 19.2183], zoom: 12 },
+  { id: 'thane', name: 'Thane', avgCFI: 61.3, peakHour: '9:15 AM', worstDay: 'Tuesday', totalSegments: 10471, topCorridor: 'Ghodbunder Road', center: [72.9781, 19.2183], zoom: 12 },
   { id: 'nagpur', name: 'Nagpur', avgCFI: 48.7, peakHour: '9:30 AM', worstDay: 'Monday', totalSegments: 3687, topCorridor: 'Ring Road', center: [79.0882, 21.1458], zoom: 12 },
   { id: 'kolhapur', name: 'Kolhapur', avgCFI: 45.2, peakHour: '9:00 AM', worstDay: 'Friday', totalSegments: 5030, topCorridor: 'NH-48', center: [74.2433, 16.7050], zoom: 12.5 },
 ];
