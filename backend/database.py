@@ -9,10 +9,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+# Prefer Supabase (has PostGIS) over the Replit-managed DB (no PostGIS)
+DATABASE_URL = os.getenv("SUPABASE_DATABASE_URL") or os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is required")
+    raise RuntimeError("DATABASE_URL or SUPABASE_DATABASE_URL is required")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
