@@ -41,6 +41,8 @@ def ensure_performance_indexes():
         # Spatial index — build concurrently because it can take a long time
         # on large tables and must not block writes.
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_road_segments_geometry_gist ON road_segments USING GIST (geometry)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_traffic_observations_geometry_geog_gist ON traffic_observations USING GIST ((geometry::geography))",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_traffic_hotspots_geometry_geog_gist ON traffic_hotspots USING GIST ((geometry::geography))",
     ]
 
     tx_statements = [
@@ -56,6 +58,7 @@ def ensure_performance_indexes():
         # Date-only index for any remaining range scans
         "CREATE INDEX IF NOT EXISTS idx_traffic_data_date ON traffic_data (date)",
         "CREATE INDEX IF NOT EXISTS idx_traffic_observations_city_time ON traffic_observations (LOWER(city), observed_at)",
+        "CREATE INDEX IF NOT EXISTS idx_traffic_observations_city_time_congested ON traffic_observations (LOWER(city), observed_at) WHERE congestion_index IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS idx_traffic_observations_road_time ON traffic_observations (road_segment_id, observed_at)",
         "CREATE INDEX IF NOT EXISTS idx_traffic_observations_jam_time ON traffic_observations (jam_level, observed_at)",
         "CREATE INDEX IF NOT EXISTS idx_traffic_hotspots_city_status ON traffic_hotspots (LOWER(city), status)",

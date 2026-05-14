@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "0 * * * *"
 
+concurrency:
+  group: traffic-ingestion
+  cancel-in-progress: false
+
 jobs:
   ingest:
     runs-on: ubuntu-latest
@@ -23,6 +27,7 @@ jobs:
 
       - name: Run hourly TomTom traffic ingestion
         env:
+          AUTO_CREATE_INDEXES: "true"
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TOMTOM_API_KEY: ${{ secrets.TOMTOM_API_KEY }}
           TOMTOM_TILE_DAILY_LIMIT: "45000"

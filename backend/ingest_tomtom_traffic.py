@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - handled at runtime for deploy clarity
     decode_mvt = None
 
 try:
-    from .database import SessionLocal, engine
+    from .database import SessionLocal, engine, ensure_performance_indexes
     from .models import Base
     from .tomtom_client import (
         TileCoord,
@@ -28,7 +28,7 @@ try:
         tiles_for_bbox,
     )
 except ImportError:
-    from database import SessionLocal, engine  # type: ignore[no-redef]
+    from database import SessionLocal, engine, ensure_performance_indexes  # type: ignore[no-redef]
     from models import Base  # type: ignore[no-redef]
     from tomtom_client import (  # type: ignore[no-redef]
         TileCoord,
@@ -478,20 +478,36 @@ def _record_run(
 
 
 def _refresh_daily_stats(db, city: str, target_date: date) -> None:
+    start_of_day = datetime.combine(target_date, time.min)
+    end_of_day = start_of_day + timedelta(days=1)
     db.execute(
         text("""
-            WITH hotspot_observations AS (
+            WITH city_hotspots AS (
+                SELECT
+                    id,
+                    geometry
+                FROM traffic_hotspots
+                WHERE LOWER(city) = LOWER(:city)
+            ),
+            city_observations AS (
+                SELECT
+                    observed_at,
+                    congestion_index,
+                    geometry
+                FROM traffic_observations
+                WHERE LOWER(city) = LOWER(:city)
+                  AND observed_at >= :start_of_day
+                  AND observed_at < :end_of_day
+                  AND congestion_index IS NOT NULL
+            ),
+            hotspot_observations AS (
                 SELECT
                     h.id AS hotspot_id,
                     o.observed_at,
                     o.congestion_index
-                FROM traffic_hotspots h
-                JOIN traffic_observations o
-                  ON LOWER(o.city) = LOWER(h.city)
-                 AND ST_DWithin(o.geometry::geography, h.geometry::geography, 250)
-                WHERE LOWER(h.city) = LOWER(:city)
-                  AND CAST(o.observed_at AS date) = :target_date
-                  AND o.congestion_index IS NOT NULL
+                FROM city_hotspots h
+                JOIN city_observations o
+                  ON ST_DWithin(o.geometry::geography, h.geometry::geography, 250)
             ),
             ranked_peak AS (
                 SELECT DISTINCT ON (hotspot_id)
@@ -535,7 +551,12 @@ def _refresh_daily_stats(db, city: str, target_date: date) -> None:
             FROM aggregated a
             LEFT JOIN ranked_peak rp ON rp.hotspot_id = a.hotspot_id
         """),
-        {"city": city, "target_date": target_date},
+        {
+            "city": city,
+            "target_date": target_date,
+            "start_of_day": start_of_day,
+            "end_of_day": end_of_day,
+        },
     )
 
 
@@ -552,7 +573,14 @@ def _expire_raw_payloads(db, now: datetime) -> None:
     )
 
 
-def ingest_city(client: TomTomClient, city: str, mode: str, observed_at: datetime) -> dict[str, int]:
+def ingest_city(
+    client: TomTomClient,
+    city: str,
+    mode: str,
+    observed_at: datetime,
+    *,
+    finalize_city: bool = True,
+) -> dict[str, int]:
     if city not in SUPPORTED_CITIES:
         raise ValueError(f"Unsupported city '{city}'. Supported: {', '.join(SUPPORTED_CITIES)}")
 
@@ -624,8 +652,9 @@ def ingest_city(client: TomTomClient, city: str, mode: str, observed_at: datetim
                         hotspots_updated += 1
                 db.commit()
 
-        _refresh_daily_stats(db, city, observed_at.date())
-        _expire_raw_payloads(db, observed_at)
+        if finalize_city:
+            _refresh_daily_stats(db, city, observed_at.date())
+            _expire_raw_payloads(db, observed_at)
         db.commit()
         _record_run(
             db,
@@ -687,6 +716,7 @@ def main() -> None:
     args = parser.parse_args()
 
     Base.metadata.create_all(bind=engine)
+    ensure_performance_indexes()
     observed_at = datetime.now(timezone.utc).replace(tzinfo=None)
     modes = modes_for_now(datetime.now(IST)) if args.mode == "auto" else [args.mode]
     if not modes:
@@ -696,16 +726,29 @@ def main() -> None:
     client = TomTomClient()
     cities = args.city or list(SUPPORTED_CITIES.keys())
     totals = {"tile_requests": 0, "observations_saved": 0, "observations_skipped": 0, "hotspots_updated": 0}
-    for mode in modes:
-        for city in cities:
+    for city in cities:
+        city_had_success = False
+        for mode in modes:
             log.info("Ingesting %s traffic for %s", mode, city)
             try:
-                result = ingest_city(client, city, mode, observed_at)
+                result = ingest_city(client, city, mode, observed_at, finalize_city=False)
             except Exception as exc:
                 log.error("TomTom ingestion failed for %s/%s: %s", city, mode, exc)
                 continue
+            city_had_success = True
             for key, value in result.items():
                 totals[key] += value
+        if city_had_success:
+            db = SessionLocal()
+            try:
+                _refresh_daily_stats(db, city, observed_at.date())
+                _expire_raw_payloads(db, observed_at)
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                log.error("Daily hotspot stats refresh failed for %s: %s", city, exc)
+            finally:
+                db.close()
     log.info("TomTom ingestion complete: %s", json.dumps(totals, sort_keys=True))
 
 
