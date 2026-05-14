@@ -27,8 +27,11 @@ export interface Segment {
 }
 
 export const cities: City[] = [
+  { id: 'bengaluru', name: 'Bengaluru', avgCFI: 72.8, peakHour: '8:45 AM', worstDay: 'Tuesday', totalSegments: 1998, topCorridor: 'Outer Ring Road', center: [77.5946, 12.9716], zoom: 11.5 },
   { id: 'pune', name: 'Pune', avgCFI: 58.2, peakHour: '9:15 AM', worstDay: 'Tuesday', totalSegments: 110960, topCorridor: 'Pune-Mumbai Highway', center: [73.8567, 18.5204], zoom: 12 },
   { id: 'mumbai', name: 'Mumbai', avgCFI: 68.9, peakHour: '9:00 AM', worstDay: 'Wednesday', totalSegments: 62740, topCorridor: 'Western Express Highway', center: [72.8777, 19.0760], zoom: 11 },
+  { id: 'chennai', name: 'Chennai', avgCFI: 63.5, peakHour: '8:45 AM', worstDay: 'Wednesday', totalSegments: 982, topCorridor: 'Anna Salai', center: [80.2707, 13.0827], zoom: 11.5 },
+  { id: 'hyderabad', name: 'Hyderabad', avgCFI: 60.4, peakHour: '9:00 AM', worstDay: 'Tuesday', totalSegments: 1071, topCorridor: 'Hitec City Main Road', center: [78.4867, 17.3850], zoom: 11.5 },
   { id: 'nashik', name: 'Nashik', avgCFI: 52.1, peakHour: '9:00 AM', worstDay: 'Monday', totalSegments: 11077, topCorridor: 'Mumbai-Agra Highway', center: [73.7898, 19.9975], zoom: 12 },
   { id: 'thane', name: 'Thane', avgCFI: 61.3, peakHour: '9:15 AM', worstDay: 'Tuesday', totalSegments: 10471, topCorridor: 'Ghodbunder Road', center: [72.9781, 19.2183], zoom: 12 },
   { id: 'nagpur', name: 'Nagpur', avgCFI: 48.7, peakHour: '9:30 AM', worstDay: 'Monday', totalSegments: 3687, topCorridor: 'Ring Road', center: [79.0882, 21.1458], zoom: 12 },

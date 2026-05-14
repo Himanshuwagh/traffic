@@ -3,13 +3,16 @@ builder        = "DOCKERFILE"
 dockerfilePath = "Dockerfile.fetcher"
 
 [deploy]
-# District-based batch job — covers all of India using OSM admin boundaries.
-# Set STATE_FILTER to a comma-separated list of state names to run only those
-# states on this deploy, e.g.:
-#   STATE_FILTER=Maharashtra,Goa
-#   STATE_FILTER=Uttar Pradesh
-# Leave STATE_FILTER unset (or empty) to run all 36 states / 766 districts.
-startCommand      = "python fetch_india_districts.py"
+# Major-city batch job — fetches the curated India city list from
+# `backend/fetch_all_india.py` instead of importing every district.
+#
+# Useful env vars:
+#   WAIT_MINUTES=2
+#   CITY_NAME="Pune, India"   (only if you later switch to fetch_segments.py manually)
+#
+# This path is much smaller than the district-wide import and is the safer fit
+# for Railway + Supabase free-tier storage constraints.
+startCommand      = "python fetch_all_india.py"
 # One-shot batch job — never restart after the script finishes.
 restartPolicyType = "NEVER"
 # No healthcheck — this is not an HTTP server.

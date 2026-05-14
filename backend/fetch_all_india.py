@@ -59,6 +59,13 @@ from sqlalchemy import text
 # Configuration
 # ---------------------------------------------------------------------------
 WAIT_MINUTES: int = int(os.getenv("WAIT_MINUTES", "30"))
+MAX_CITIES_PER_RUN: int = max(0, int(os.getenv("MAX_CITIES_PER_RUN", "0")))
+_city_filter_raw: str = os.getenv("CITY_FILTER", "").strip()
+CITY_FILTER: list[str] = (
+    [s.strip() for s in _city_filter_raw.split(",") if s.strip()]
+    if _city_filter_raw
+    else []
+)
 LINE = "=" * 68
 THIN = "-" * 68
 
@@ -130,6 +137,14 @@ def _short_name(city_query: str) -> str:
     return city_query.split(",")[0].strip().lower()
 
 
+def _norm_label(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def _parse_filter_set(values: list[str]) -> set[str]:
+    return {_norm_label(v) for v in values if v.strip()}
+
+
 def _fmt_duration(seconds: float) -> str:
     """Turn a raw seconds value into a human-readable string."""
     if seconds < 60:
@@ -170,6 +185,10 @@ def _ensure_progress_table() -> None:
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_fp_run_city "
             "ON fetch_progress (run_id, city)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_fp_city_status "
+            "ON fetch_progress (city, status)"
         ))
     log.info("fetch_progress table ready.")
 
@@ -290,20 +309,39 @@ def main() -> None:
     log.info(f"  Started  : {wall_start.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     log.info(f"  Cooldown : {WAIT_MINUTES} min between cities  "
              f"(set WAIT_MINUTES env var to override)")
+    if MAX_CITIES_PER_RUN > 0:
+        log.info(f"  Max cities : {MAX_CITIES_PER_RUN}")
+    if CITY_FILTER:
+        log.info(f"  CITY_FILTER: {', '.join(CITY_FILTER)}")
+    else:
+        log.info("  CITY_FILTER: (all configured cities)")
     log.info(LINE)
 
     # ── Ensure progress table exists ─────────────────────────────────────────
     _ensure_progress_table()
 
     # ── Determine what still needs processing ────────────────────────────────
-    processed_set = _get_processed_cities()
-    already_done  = [c for c in ALL_INDIA_CITIES if _short_name(c) in processed_set]
-    remaining     = [c for c in ALL_INDIA_CITIES if _short_name(c) not in processed_set]
+    city_filter_set = _parse_filter_set(CITY_FILTER) if CITY_FILTER else set()
+    scoped_cities = [
+        city for city in ALL_INDIA_CITIES
+        if not city_filter_set or _norm_label(_short_name(city)) in city_filter_set
+    ]
+    if MAX_CITIES_PER_RUN > 0:
+        scoped_cities = scoped_cities[:MAX_CITIES_PER_RUN]
 
-    log.info(f"  Total cities          : {len(ALL_INDIA_CITIES)}")
+    processed_set = _get_processed_cities()
+    already_done  = [c for c in scoped_cities if _short_name(c) in processed_set]
+    remaining     = [c for c in scoped_cities if _short_name(c) not in processed_set]
+
+    log.info(f"  Total configured cities: {len(ALL_INDIA_CITIES)}")
+    log.info(f"  Cities in scope        : {len(scoped_cities)}")
     log.info(f"  Already successful    : {len(already_done)}")
     log.info(f"  To process now        : {len(remaining)}")
     log.info(LINE)
+
+    if not scoped_cities:
+        log.warning("No cities matched CITY_FILTER/MAX_CITIES_PER_RUN.")
+        return
 
     # Record already-done cities in the progress table for this run
     for city in already_done:

@@ -162,6 +162,17 @@ def build_common_filters(
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     return where_sql, params
 
+
+def city_has_road_segments(db: Session, city: str | None) -> bool:
+    if not city:
+        return False
+    return bool(
+        db.execute(
+            text("SELECT EXISTS (SELECT 1 FROM road_segments WHERE LOWER(city) = LOWER(:city))"),
+            {"city": city},
+        ).scalar()
+    )
+
 @router.post("/api/traffic/fetch")
 async def trigger_traffic_fetch(
     city: str | None = Query(default=None, description="City to fetch (omit for all)"),
@@ -790,11 +801,12 @@ async def get_segment_tile(
                 headers={"Cache-Control": "public, max-age=3600"},
             )
 
+        use_road_segments = city_has_road_segments(db, city)
         city_clauses: list[str] = []
         filter_params: dict = {}
         if city:
-            city_clauses.append("LOWER(rs.city) = LOWER(:city)")
             filter_params["city"] = city
+            city_clauses.append("LOWER(src.city) = LOWER(:city)")
         city_where = ("WHERE " + " AND ".join(city_clauses)) if city_clauses else "WHERE TRUE"
 
         params = {
@@ -804,6 +816,34 @@ async def get_segment_tile(
             "simplify_tolerance": simplify_tolerance,
             **filter_params,
         }
+
+        source_rows_sql = """
+                SELECT
+                    rs.id,
+                    rs.city,
+                    COALESCE(rs.name, 'Unknown') AS name,
+                    COALESCE(rs.highway_type, 'unknown') AS highway_type,
+                    rs.geometry
+                FROM road_segments rs
+        """
+        if city and not use_road_segments:
+            source_rows_sql = """
+                SELECT DISTINCT ON (COALESCE(o.road_segment_id, o.id))
+                    COALESCE(o.road_segment_id, o.id) AS id,
+                    o.city,
+                    COALESCE(rs.name, h.name, 'Observed traffic segment') AS name,
+                    COALESCE(rs.highway_type, 'traffic') AS highway_type,
+                    o.geometry
+                FROM traffic_observations o
+                LEFT JOIN road_segments rs ON rs.id = o.road_segment_id
+                LEFT JOIN traffic_hotspots h
+                    ON LOWER(h.city) = LOWER(o.city)
+                   AND ST_DWithin(h.geometry::geography, o.geometry::geography, 250)
+                WHERE o.geometry IS NOT NULL
+                  AND LOWER(o.city) = LOWER(:city)
+                  AND o.observed_at >= NOW() - INTERVAL '14 days'
+                ORDER BY COALESCE(o.road_segment_id, o.id), o.observed_at DESC
+            """
 
         query = text(
             f"""
@@ -815,15 +855,15 @@ async def get_segment_tile(
             ),
             tile_rows AS (
                 SELECT
-                    rs.id,
-                    COALESCE(rs.name, 'Unknown')        AS name,
-                    COALESCE(rs.highway_type, 'unknown') AS highway_type,
+                    src.id,
+                    src.name,
+                    src.highway_type,
                     ST_AsMVTGeom(
                         ST_Transform(
                             CASE
                                 WHEN :simplify_tolerance > 0
-                                    THEN ST_SimplifyPreserveTopology(rs.geometry, :simplify_tolerance)
-                                ELSE rs.geometry
+                                    THEN ST_SimplifyPreserveTopology(src.geometry, :simplify_tolerance)
+                                ELSE src.geometry
                             END,
                             3857
                         ),
@@ -832,9 +872,11 @@ async def get_segment_tile(
                         256,
                         true
                     ) AS geom
-                FROM road_segments rs, bounds
+                FROM (
+                    {source_rows_sql}
+                ) src, bounds
                 {city_where}
-                  AND rs.geometry && bounds.bounds_4326
+                  AND src.geometry && bounds.bounds_4326
             )
             SELECT ST_AsMVT(tile_rows, 'segments', 4096, 'geom')
             FROM tile_rows

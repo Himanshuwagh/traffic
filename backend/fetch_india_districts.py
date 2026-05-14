@@ -73,6 +73,9 @@ from sqlalchemy import text
 # Configuration
 # ---------------------------------------------------------------------------
 WAIT_MINUTES: int = int(os.getenv("WAIT_MINUTES", "2"))
+MAX_DISTRICTS_PER_RUN: int = max(0, int(os.getenv("MAX_DISTRICTS_PER_RUN", "0")))
+SHARD_INDEX: int = int(os.getenv("SHARD_INDEX", "0"))
+SHARD_COUNT: int = max(1, int(os.getenv("SHARD_COUNT", "1")))
 
 # Comma-separated state names, e.g. "Maharashtra,Karnataka"
 # If empty / unset, ALL states are processed.
@@ -82,9 +85,23 @@ STATE_FILTER: list[str] = (
     if _state_filter_raw
     else []
 )
+_district_filter_raw: str = os.getenv("DISTRICT_FILTER", "").strip()
+DISTRICT_FILTER: list[str] = (
+    [s.strip() for s in _district_filter_raw.split(",") if s.strip()]
+    if _district_filter_raw
+    else []
+)
 
 LINE = "=" * 68
 THIN = "-" * 68
+
+
+def _norm_label(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def _parse_filter_set(values: list[str]) -> set[str]:
+    return {_norm_label(v) for v in values if v.strip()}
 
 
 # ---------------------------------------------------------------------------
@@ -278,41 +295,60 @@ def main() -> None:  # noqa: C901 — complexity is inherent in a batch runner
         "(set WAIT_MINUTES env var to override)",
         WAIT_MINUTES,
     )
+    if SHARD_COUNT > 1:
+        log.info("  Shard        : %d / %d", SHARD_INDEX + 1, SHARD_COUNT)
+    if MAX_DISTRICTS_PER_RUN > 0:
+        log.info("  Max districts: %d", MAX_DISTRICTS_PER_RUN)
     if STATE_FILTER:
         log.info("  STATE_FILTER : %s", ", ".join(STATE_FILTER))
     else:
         log.info("  STATE_FILTER : (all states)")
+    if DISTRICT_FILTER:
+        log.info("  DISTRICT_FILTER : %s", ", ".join(DISTRICT_FILTER))
     log.info(LINE)
 
     # ── Ensure progress table exists ─────────────────────────────────────────
     _ensure_district_progress_table()
 
     # ── Build the filtered working set ───────────────────────────────────────
-    # Normalise state filter to title-case for robust matching
-    filter_set: set[str] = {s.strip() for s in STATE_FILTER} if STATE_FILTER else set()
+    if SHARD_INDEX < 0 or SHARD_INDEX >= SHARD_COUNT:
+        raise ValueError(f"SHARD_INDEX must be between 0 and {SHARD_COUNT - 1}, got {SHARD_INDEX}")
+
+    state_filter_set = _parse_filter_set(STATE_FILTER) if STATE_FILTER else set()
+    district_filter_set = _parse_filter_set(DISTRICT_FILTER) if DISTRICT_FILTER else set()
 
     all_pairs: list[tuple[str, str]] = []   # (state, district)
     for state, districts in INDIA_DISTRICTS.items():
-        if filter_set and state not in filter_set:
+        if state_filter_set and _norm_label(state) not in state_filter_set:
             continue
         for district in districts:
+            if district_filter_set and _norm_label(district) not in district_filter_set:
+                continue
             all_pairs.append((state, district))
+
+    if SHARD_COUNT > 1:
+        all_pairs = [pair for idx, pair in enumerate(all_pairs) if idx % SHARD_COUNT == SHARD_INDEX]
+
+    if MAX_DISTRICTS_PER_RUN > 0:
+        all_pairs = all_pairs[:MAX_DISTRICTS_PER_RUN]
 
     total_districts = len(all_pairs)
 
     log.info("  Districts in scope : %d", total_districts)
-    if filter_set:
+    if state_filter_set:
         log.info(
             "  States in scope    : %s  (%d total)",
-            ", ".join(sorted(filter_set)),
-            len(filter_set),
+            ", ".join(sorted({state for state, _ in all_pairs})),
+            len({state for state, _ in all_pairs}),
         )
+    if district_filter_set:
+        log.info("  District filter count: %d", len(district_filter_set))
     log.info(LINE)
 
     if total_districts == 0:
         log.warning(
-            "No districts matched the current STATE_FILTER. "
-            "Check spelling — state names are case-sensitive: %s",
+            "No districts matched the current filters. "
+            "Check spelling — example states: %s",
             list(INDIA_DISTRICTS.keys())[:5],
         )
         return

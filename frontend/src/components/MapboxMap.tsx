@@ -56,6 +56,8 @@ const TILE_SERVER_URL = (
 interface MapboxMapProps {
   city: City;
   cityId: string;
+  knownCities: City[];
+  onViewportCityChange?: (cityId: string) => void;
   selectedSegmentId: string | null;
   onSegmentClick: (id: string) => void;
   timeHour: number;
@@ -285,6 +287,24 @@ const buildDateTimeKey = (date: string, hour: number): string => {
 
 const roundCoord = (v: number) => Number(v.toFixed(4));
 
+const CITY_SWITCH_DISTANCE_KM = 60;
+
+const distanceKm = (
+  [lon1, lat1]: [number, number],
+  [lon2, lat2]: [number, number],
+): number => {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const earthRadiusKm = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) ** 2;
+  return 2 * earthRadiusKm * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
 const paddedBounds = (b: mapboxgl.LngLatBounds): string => {
   const [w, s, e, n] = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
   const lp = (e - w) * 0.35,
@@ -330,6 +350,8 @@ const upsertSource = (
 const MapboxMap: React.FC<MapboxMapProps> = ({
   city,
   cityId,
+  knownCities,
+  onViewportCityChange,
   selectedSegmentId,
   onSegmentClick,
   timeHour,
@@ -423,6 +445,38 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
         essential: true,
       });
   }, [city, mapLoaded]);
+
+  useEffect(() => {
+    if (!map.current || !mapLoaded || !onViewportCityChange) return;
+
+    const updateViewportCity = () => {
+      const center = map.current?.getCenter();
+      if (!center) return;
+
+      const nearest = knownCities
+        .map((candidate) => ({
+          id: candidate.id,
+          distance: distanceKm(
+            [center.lng, center.lat],
+            [candidate.center[0], candidate.center[1]],
+          ),
+        }))
+        .sort((a, b) => a.distance - b.distance)[0];
+
+      if (
+        nearest &&
+        nearest.id !== cityId &&
+        nearest.distance <= CITY_SWITCH_DISTANCE_KM
+      ) {
+        onViewportCityChange(nearest.id);
+      }
+    };
+
+    map.current.on("moveend", updateViewportCity);
+    return () => {
+      map.current?.off("moveend", updateViewportCity);
+    };
+  }, [cityId, knownCities, mapLoaded, onViewportCityChange]);
 
   // ── 3. BASE layer — road skeleton from Worker tile server or API fallback ───
   //

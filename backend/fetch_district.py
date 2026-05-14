@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import osmnx as ox
+from shapely.geometry import LineString, MultiLineString
 from sqlalchemy import text
 
 try:
@@ -33,6 +35,10 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 BATCH_SIZE: int = max(1, int(os.getenv("SEGMENT_INSERT_BATCH_SIZE", "500")))
+OVERPASS_TIMEOUT_SECONDS: int = max(60, int(os.getenv("OSMNX_TIMEOUT_SECONDS", "180")))
+OVERPASS_MEMORY_MB: int = max(256, int(os.getenv("OSMNX_OVERPASS_MEMORY_MB", "2048")))
+FETCH_RETRIES: int = max(1, int(os.getenv("DISTRICT_FETCH_RETRIES", "3")))
+RETRY_SLEEP_SECONDS: int = max(5, int(os.getenv("DISTRICT_RETRY_SLEEP_SECONDS", "20")))
 
 # ---------------------------------------------------------------------------
 # Road filter — only fetch highway types that are relevant for traffic
@@ -90,6 +96,35 @@ def _first(raw, default: str = "Unknown") -> str:
     return str(raw) if raw is not None else default
 
 
+def _iter_lines(geom) -> list[LineString]:
+    if isinstance(geom, LineString):
+        return [geom]
+    if isinstance(geom, MultiLineString):
+        return [line for line in geom.geoms if isinstance(line, LineString)]
+    return []
+
+
+def _candidate_place_queries(district: str, state: str) -> list[str]:
+    queries = [
+        f"{district}, {state}, India",
+        f"{district} district, {state}, India",
+    ]
+    if "district" in district.lower():
+        queries.append(f"{district}, India")
+    else:
+        queries.append(f"{district} district, India")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        key = query.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(query)
+    return deduped
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -101,39 +136,60 @@ def fetch_segments_for_district(district: str, state: str) -> bool:
     Returns True on success (including empty districts), False on any error.
     Never raises.
     """
-    place = f"{district}, {state}, India"
     short = district.strip().lower()
+    place_queries = _candidate_place_queries(district, state)
 
-    log.info('Fetching road network for "%s" from OSMnx (place boundary)…', place)
+    log.info('Fetching road network for "%s, %s" from OSMnx (place boundary)…', district, state)
 
     # ── Step 1: Download graph from OSM ──────────────────────────────────────
     log.info(
         '  Highway filter : %s',
         HIGHWAY_FILTER,
     )
-    try:
-        G = ox.graph_from_place(
-            place,
-            custom_filter=OSMNX_CUSTOM_FILTER,
-            simplify=True,
-            retain_all=False,
-        )
-    except Exception as exc:
-        log.error('OSMnx could not fetch "%s": %s', place, exc)
+    G = None
+    last_error: Exception | None = None
+    ox.settings.requests_timeout = OVERPASS_TIMEOUT_SECONDS
+    ox.settings.overpass_settings = (
+        f'[out:json][timeout:{OVERPASS_TIMEOUT_SECONDS}][maxsize:{OVERPASS_MEMORY_MB * 1024 * 1024}]'
+    )
+    for attempt in range(1, FETCH_RETRIES + 1):
+        for place in place_queries:
+            try:
+                log.info('  Attempt %d/%d with place query: %s', attempt, FETCH_RETRIES, place)
+                G = ox.graph_from_place(
+                    place,
+                    custom_filter=OSMNX_CUSTOM_FILTER,
+                    simplify=True,
+                    retain_all=True,
+                )
+                if G is not None:
+                    break
+            except Exception as exc:
+                last_error = exc
+                log.warning('  OSMnx fetch failed for "%s" on attempt %d/%d: %s', place, attempt, FETCH_RETRIES, exc)
+        if G is not None:
+            break
+        if attempt < FETCH_RETRIES:
+            sleep_for = RETRY_SLEEP_SECONDS * attempt
+            log.info('  Retrying district after %ds backoff…', sleep_for)
+            time.sleep(sleep_for)
+
+    if G is None:
+        log.error('OSMnx could not fetch district "%s, %s" after %d attempts: %s', district, state, FETCH_RETRIES, last_error)
         return False
 
     # ── Step 2: Convert to GeoDataFrame ──────────────────────────────────────
     try:
         gdf = ox.graph_to_gdfs(G, nodes=False)
     except Exception as exc:
-        log.error('graph_to_gdfs failed for "%s": %s', place, exc)
+        log.error('graph_to_gdfs failed for "%s, %s": %s', district, state, exc)
         return False
 
     total = len(gdf)
-    log.info('Loaded %d road segments for %s', total, place)
+    log.info('Loaded %d road segments for %s, %s', total, district, state)
 
     if total == 0:
-        log.warning('No road segments found for "%s" — marking success (empty graph).', place)
+        log.warning('No road segments found for "%s, %s" — marking success (empty graph).', district, state)
         return True
 
     # ── Step 3: Persist to DB ─────────────────────────────────────────────────
@@ -152,21 +208,22 @@ def fetch_segments_for_district(district: str, state: str) -> bool:
         batch: list[dict] = []
 
         for _, row in gdf.iterrows():
-            geom = row.geometry
-            if geom.geom_type != "LineString":
+            geoms = _iter_lines(row.geometry)
+            if not geoms:
                 continue
 
-            batch.append({
-                "name":         _first(row.get("name"), "Unknown"),
-                "city":         short,
-                "wkt":          geom.wkt,
-                "lanes":        _parse_lanes(row.get("lanes")),
-                "highway_type": _first(row.get("highway"), "Unknown"),
-                "oneway":       _first(row.get("oneway"), "False"),
-            })
+            for geom in geoms:
+                batch.append({
+                    "name":         _first(row.get("name"), "Unknown"),
+                    "city":         short,
+                    "wkt":          geom.wkt,
+                    "lanes":        _parse_lanes(row.get("lanes")),
+                    "highway_type": _first(row.get("highway"), "Unknown"),
+                    "oneway":       _first(row.get("oneway"), "False"),
+                })
 
-            if len(batch) >= BATCH_SIZE:
-                saved = _flush(db, batch, short, saved)
+                if len(batch) >= BATCH_SIZE:
+                    saved = _flush(db, batch, short, saved)
 
         # Flush remainder
         saved = _flush(db, batch, short, saved)
@@ -175,7 +232,7 @@ def fetch_segments_for_district(district: str, state: str) -> bool:
 
     except Exception as exc:
         db.rollback()
-        log.error("DB error while saving '%s': %s", place, exc, exc_info=True)
+        log.error("DB error while saving '%s, %s': %s", district, state, exc, exc_info=True)
         return False
     finally:
         db.close()

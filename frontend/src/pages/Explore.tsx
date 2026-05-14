@@ -18,7 +18,8 @@ import { apiUrl } from "../lib/api";
 
 const Explore: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
-  const cityParam = searchParams.get("city") || "bengaluru";
+  const defaultCityId = cities[0]?.id || "pune";
+  const cityParam = searchParams.get("city") || defaultCityId;
   const dateParam =
     searchParams.get("date") || new Date().toISOString().split("T")[0];
   const timeParam = Number(searchParams.get("hour"));
@@ -26,8 +27,11 @@ const Explore: React.FC = () => {
     Number.isInteger(timeParam) && timeParam >= 0 && timeParam <= 23
       ? timeParam
       : 8;
+  const normalizedInitialCityId = cities.some((c) => c.id === cityParam)
+    ? cityParam
+    : defaultCityId;
 
-  const [selectedCityId, setSelectedCityId] = useState(cityParam);
+  const [selectedCityId, setSelectedCityId] = useState(normalizedInitialCityId);
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(
     null,
   );
@@ -204,6 +208,8 @@ const Explore: React.FC = () => {
           <MapboxMap
             city={city}
             cityId={city.id}
+            knownCities={cities}
+            onViewportCityChange={setSelectedCityId}
             selectedSegmentId={selectedSegmentId}
             onSegmentClick={setSelectedSegmentId}
             timeHour={timeHour}
