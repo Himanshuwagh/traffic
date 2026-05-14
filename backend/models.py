@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, Index, Integer, LargeBinary, String, Text, UniqueConstraint
 from geoalchemy2 import Geometry
 try:
     from .database import Base
@@ -47,6 +47,26 @@ class TrafficObservation(Base):
     road_closure = Column(Boolean, nullable=True)
     raw_payload = Column(Text, nullable=True)
     raw_ttl_expires_at = Column(DateTime, nullable=True, index=True)
+
+
+class TrafficTileCache(Base):
+    __tablename__ = "traffic_tile_cache"
+    __table_args__ = (
+        UniqueConstraint("city", "date_hour", "z", "x", "y", name="uq_traffic_tile_cache_tile"),
+        Index("idx_traffic_tile_cache_lookup", "city", "date_hour", "z", "x", "y"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    city = Column(String, nullable=False, index=True)
+    date_hour = Column(DateTime, nullable=False, index=True)
+    z = Column(Integer, nullable=False)
+    x = Column(Integer, nullable=False)
+    y = Column(Integer, nullable=False)
+    data = Column(LargeBinary, nullable=False)
+    etag = Column(String, nullable=False)
+    encoding = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
 
 
 class TrafficHotspot(Base):

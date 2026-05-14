@@ -7,8 +7,10 @@ import json
 import time
 try:
     from .database import get_db
+    from .tile_cache import build_live_traffic_tile, cache_live_traffic_tile, lookup_cached_traffic_tile
 except ImportError:
     from database import get_db
+    from tile_cache import build_live_traffic_tile, cache_live_traffic_tile, lookup_cached_traffic_tile
 
 router = APIRouter()
 
@@ -560,17 +562,31 @@ async def get_traffic_tile(
     Serve traffic as Mapbox Vector Tiles.
 
     Performance design:
-    - Step 1: spatial query finds segments inside the tile bbox (uses GiST index, fast).
-    - Step 2: traffic lookup is scoped ONLY to those segment IDs (avoids full-table scan).
-    - LEFT JOIN → roads with no traffic data appear with a neutral gray colour so the
-      road skeleton is always visible without a separate geometry-only source.
-    - Short date window (±3 h) keeps the traffic_data range scan small.
-    - Server-side cache (60 s) + browser cache (60 s) mean repeated tile fetches are free.
+    - Ingest can pre-generate this tile into traffic_tile_cache.
+    - Requests first do a keyed lookup by city/hour/z/x/y.
+    - Cache misses fall back to the live PostGIS MVT query and populate the cache.
     """
     try:
-        _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)[1:]
-
         target_time = datetime.fromisoformat(date_str)
+        try:
+            persistent_tile = lookup_cached_traffic_tile(db, city=city, target_time=target_time, z=z, x=x, y=y)
+        except Exception:
+            db.rollback()
+            persistent_tile = None
+        if persistent_tile is not None:
+            headers = {
+                "Cache-Control": "public, max-age=3600, stale-while-revalidate=3600",
+                "ETag": persistent_tile.etag,
+            }
+            if persistent_tile.encoding:
+                headers["Content-Encoding"] = persistent_tile.encoding
+            return Response(
+                content=persistent_tile.data,
+                media_type="application/vnd.mapbox-vector-tile",
+                headers=headers,
+            )
+
+        _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)[1:]
         cache_key = (
             "tile",
             city.lower() if city else None,
@@ -589,98 +605,12 @@ async def get_traffic_tile(
                 headers={"Cache-Control": "public, max-age=60"},
             )
 
-        city_filter = "AND LOWER(o.city) = LOWER(:city)" if city else ""
-        filter_params: dict = {"city": city} if city else {}
-
-        params = {
-            "target_time": target_time,
-            "z": z,
-            "x": x,
-            "y": y,
-            "simplify_tolerance": simplify_tolerance,
-            **filter_params,
-        }
-
-        query = text(
-            f"""
-            WITH
-            -- ── 1. Compute tile envelope once ────────────────────────────────────
-            bounds AS (
-                SELECT
-                    ST_TileEnvelope(:z, :x, :y)                        AS bounds_3857,
-                    ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326)    AS bounds_4326
-            ),
-            -- ── 2. Find normalized traffic observations inside this tile ───────
-            tile_observations AS (
-                SELECT
-                    o.id,
-                    o.road_segment_id,
-                    o.geometry,
-                    o.speed_kmph,
-                    o.travel_time_seconds,
-                    o.congestion_index,
-                    o.jam_level,
-                    COALESCE(rs.name, h.name, 'Unmatched traffic hotspot') AS name,
-                    COALESCE(rs.highway_type, 'traffic') AS highway_type
-                FROM traffic_observations o
-                LEFT JOIN road_segments rs ON rs.id = o.road_segment_id
-                LEFT JOIN traffic_hotspots h
-                    ON LOWER(h.city) = LOWER(o.city)
-                   AND ST_DWithin(h.geometry::geography, o.geometry::geography, 250)
-                CROSS JOIN bounds
-                WHERE o.observed_at BETWEEN :target_time - INTERVAL '3 hours'
-                                        AND :target_time + INTERVAL '3 hours'
-                  AND o.geometry && bounds.bounds_4326
-                  {city_filter}
-            ),
-            -- ── 3. Pick the closest/current best observation per road/ref ───────
-            closest_traffic AS (
-                SELECT DISTINCT ON (COALESCE(road_segment_id, id))
-                    *
-                FROM tile_observations
-                ORDER BY COALESCE(road_segment_id, id), COALESCE(congestion_index, 0) DESC
-            ),
-            -- ── 4. Build MVT geometry ──────────────────────────────────────────
-            tile_rows AS (
-                SELECT
-                    COALESCE(ct.road_segment_id, ct.id) AS id,
-                    COALESCE(ct.name, 'Unknown') AS name,
-                    COALESCE(ct.highway_type, 'traffic') AS highway_type,
-                    ct.speed_kmph AS speed,
-                    ct.travel_time_seconds AS travel_time,
-                    ct.congestion_index,
-                    ct.jam_level,
-                    CASE
-                        WHEN ct.congestion_index IS NULL THEN '#a0a0b0'
-                        WHEN ct.congestion_index >= 0.75 THEN '#FF0000'
-                        WHEN ct.congestion_index >= 0.50 THEN '#FF9900'
-                        WHEN ct.congestion_index >= 0.25 THEN '#FFFF00'
-                        ELSE '#00C700'
-                    END AS color,
-                    ST_AsMVTGeom(
-                        ST_Transform(
-                            CASE
-                                WHEN :simplify_tolerance > 0
-                                    THEN ST_SimplifyPreserveTopology(ct.geometry, :simplify_tolerance)
-                                ELSE ct.geometry
-                            END,
-                            3857
-                        ),
-                        bounds.bounds_3857,
-                        4096,   -- extent
-                        256,    -- buffer (needed for anti-aliased lines at tile edges)
-                        true    -- clip
-                    ) AS geom
-                FROM closest_traffic ct
-                CROSS JOIN bounds
-            )
-            SELECT ST_AsMVT(tile_rows, '{MVT_LAYER_NAME}', 4096, 'geom')
-            FROM tile_rows
-            WHERE geom IS NOT NULL
-            """
-        )
-
-        tile = db.execute(query, params).scalar() or b""
+        tile = build_live_traffic_tile(db, city=city, target_time=target_time, z=z, x=x, y=y)
+        try:
+            cache_live_traffic_tile(db, city=city, target_time=target_time, z=z, x=x, y=y, tile=tile)
+            db.commit()
+        except Exception:
+            db.rollback()
         store_cached_response(traffic_tile_cache, cache_key, tile, now)
         return Response(
             content=tile,

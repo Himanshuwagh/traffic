@@ -288,6 +288,8 @@ const buildDateTimeKey = (date: string, hour: number): string => {
 const roundCoord = (v: number) => Number(v.toFixed(4));
 const PREWARM_TILE_RADIUS = 1;
 const PREWARM_ALL_CITY_RADIUS = 0;
+const VIEWPORT_PREFETCH_PADDING = 0.2;
+const VIEWPORT_PREFETCH_MAX_TILES = 64;
 
 const CITY_SWITCH_DISTANCE_KM = 60;
 
@@ -338,6 +340,47 @@ const lngLatToTile = (lng: number, lat: number, zoom: number) => {
     ((1 - Math.asinh(Math.tan(latRad)) / Math.PI) / 2) * scale,
   );
   return { x, y };
+};
+
+const buildBoundsTileUrls = (
+  bounds: mapboxgl.LngLatBounds,
+  zoom: number,
+  cityId: string,
+  dateStr: string,
+) => {
+  const west = bounds.getWest();
+  const east = bounds.getEast();
+  const south = bounds.getSouth();
+  const north = bounds.getNorth();
+  const lngPad = (east - west) * VIEWPORT_PREFETCH_PADDING;
+  const latPad = (north - south) * VIEWPORT_PREFETCH_PADDING;
+  const sw = lngLatToTile(west - lngPad, south - latPad, zoom);
+  const ne = lngLatToTile(east + lngPad, north + latPad, zoom);
+  const minX = Math.min(sw.x, ne.x);
+  const maxX = Math.max(sw.x, ne.x);
+  const minY = Math.min(sw.y, ne.y);
+  const maxY = Math.max(sw.y, ne.y);
+  const urls: string[] = [];
+
+  for (let x = minX; x <= maxX; x += 1) {
+    for (let y = minY; y <= maxY; y += 1) {
+      urls.push(
+        apiUrl(
+          `/api/traffic/tiles/${dateStr}/${zoom}/${x}/${y}.mvt?city=${encodeURIComponent(cityId)}`,
+        ),
+      );
+      if (!TILE_SERVER_URL) {
+        urls.push(
+          apiUrl(
+            `/api/segments/tiles/${zoom}/${x}/${y}.mvt?city=${encodeURIComponent(cityId)}`,
+          ),
+        );
+      }
+      if (urls.length >= VIEWPORT_PREFETCH_MAX_TILES) return urls;
+    }
+  }
+
+  return urls;
 };
 
 const buildCityTileUrls = (
@@ -604,6 +647,45 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
     warm();
     return () => controller.abort();
   }, [city, knownCities, mapLoaded, selectedDate, timeHour]);
+
+  useEffect(() => {
+    if (!map.current || !mapLoaded) return;
+    const controller = new AbortController();
+
+    const prefetchViewportTiles = () => {
+      if (!map.current) return;
+      const dateStr = buildDateTimeKey(selectedDate, timeHour);
+      const zoom = Math.max(
+        8,
+        Math.min(SOURCE_MAXZOOM, Math.round(map.current.getZoom())),
+      );
+      const bounds = map.current.getBounds();
+      if (!bounds) return;
+      const urls = buildBoundsTileUrls(
+        bounds,
+        zoom,
+        cityId,
+        dateStr,
+      );
+
+      urls.forEach((url) => {
+        if (prewarmedUrls.current.has(url)) return;
+        prewarmedUrls.current.add(url);
+        fetch(url, {
+          signal: controller.signal,
+          credentials: "omit",
+          cache: "force-cache",
+        }).catch(() => prewarmedUrls.current.delete(url));
+      });
+    };
+
+    map.current.on("idle", prefetchViewportTiles);
+    prefetchViewportTiles();
+    return () => {
+      map.current?.off("idle", prefetchViewportTiles);
+      controller.abort();
+    };
+  }, [cityId, mapLoaded, selectedDate, timeHour]);
 
   // ── 3. BASE layer — road skeleton from Worker tile server or API fallback ───
   //

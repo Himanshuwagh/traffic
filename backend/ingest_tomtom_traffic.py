@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - handled at runtime for deploy clarity
 try:
     from .database import SessionLocal, engine, ensure_performance_indexes
     from .models import Base
+    from .tile_cache import pregenerate_traffic_tiles_for_observations
     from .tomtom_client import (
         TileCoord,
         TomTomClient,
@@ -30,6 +31,7 @@ try:
 except ImportError:
     from database import SessionLocal, engine, ensure_performance_indexes  # type: ignore[no-redef]
     from models import Base  # type: ignore[no-redef]
+    from tile_cache import pregenerate_traffic_tiles_for_observations  # type: ignore[no-redef]
     from tomtom_client import (  # type: ignore[no-redef]
         TileCoord,
         TomTomClient,
@@ -656,6 +658,14 @@ def ingest_city(
             _refresh_daily_stats(db, city, observed_at.date())
             _expire_raw_payloads(db, observed_at)
         db.commit()
+        if finalize_city:
+            try:
+                generated_tiles = pregenerate_traffic_tiles_for_observations(db, city=city, observed_at=observed_at)
+                if generated_tiles:
+                    log.info("Pre-generated %s traffic tiles for %s at %s", generated_tiles, city, observed_at.isoformat())
+            except Exception as exc:
+                db.rollback()
+                log.warning("Traffic tile pregeneration failed for %s at %s: %s", city, observed_at.isoformat(), exc)
         _record_run(
             db,
             run_id=run_id,
@@ -744,6 +754,18 @@ def main() -> None:
                 _refresh_daily_stats(db, city, observed_at.date())
                 _expire_raw_payloads(db, observed_at)
                 db.commit()
+                try:
+                    generated_tiles = pregenerate_traffic_tiles_for_observations(db, city=city, observed_at=observed_at)
+                    if generated_tiles:
+                        log.info(
+                            "Pre-generated %s traffic tiles for %s at %s",
+                            generated_tiles,
+                            city,
+                            observed_at.isoformat(),
+                        )
+                except Exception as exc:
+                    db.rollback()
+                    log.warning("Traffic tile pregeneration failed for %s at %s: %s", city, observed_at.isoformat(), exc)
             except Exception as exc:
                 db.rollback()
                 log.error("Daily hotspot stats refresh failed for %s: %s", city, exc)
