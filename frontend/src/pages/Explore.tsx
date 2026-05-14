@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
+  CalendarDays,
   ZoomIn,
   ZoomOut,
   CloudRain,
@@ -8,6 +9,7 @@ import {
   Cloud,
   CloudLightning,
   Snowflake,
+  Clock3,
 } from "lucide-react";
 import { cities, segments } from "../data/mockData";
 import MapboxMap, { type TrafficSummary } from "../components/MapboxMap";
@@ -15,6 +17,26 @@ import CityOverview from "../components/CityOverview";
 import SegmentDetail from "../components/SegmentDetail";
 import Toast from "../components/Toast";
 import { apiUrl } from "../lib/api";
+
+const DAY_PRESETS = [
+  { label: "Today", offsetDays: 0 },
+  { label: "Yesterday", offsetDays: -1 },
+  { label: "2 days ago", offsetDays: -2 },
+] as const;
+
+const TIME_PRESETS = [
+  { label: "Morning peak", hour: 8 },
+  { label: "Midday", hour: 13 },
+  { label: "Evening peak", hour: 18 },
+  { label: "Night", hour: 22 },
+] as const;
+
+const formatDateInputValue = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 
 const Explore: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -85,6 +107,24 @@ const Explore: React.FC = () => {
     return `${h.toString().padStart(2, "0")}:00 ${ampm}`;
   };
 
+  const selectedDateLabel = useMemo(() => {
+    const parsed = new Date(`${selectedDate}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return selectedDate;
+    return parsed.toLocaleDateString("en-IN", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
+  }, [selectedDate]);
+
+  const applyDayPreset = (offsetDays: number) => {
+    const date = new Date();
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() + offsetDays);
+    setSelectedDate(formatDateInputValue(date));
+  };
+
   React.useEffect(() => {
     const fetchWeather = async () => {
       try {
@@ -131,24 +171,69 @@ const Explore: React.FC = () => {
     <div className="flex flex-1 items-stretch overflow-hidden h-[calc(100vh-64px)]">
       {/* Map Panel */}
       <div className="flex-1 w-full md:w-[65%] h-[calc(100vh-64px)] min-h-0 relative border-r border-gray-300 flex flex-col bg-[#f1ede0]">
-        <div className="absolute top-4 left-4 z-10 flex gap-2">
-          <select
-            value={selectedCityId}
-            onChange={handleCityChange}
-            className="bg-white border border-gray-200 text-gray-800 text-sm rounded-lg focus:ring-brand-amber focus:border-brand-amber block w-48 p-2.5 outline-none shadow-md cursor-pointer"
-          >
-            {cities.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-          <input
-            type="date"
-            value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
-            className="bg-white border border-gray-200 text-gray-800 text-sm rounded-lg focus:ring-brand-amber focus:border-brand-amber block w-40 p-2.5 outline-none shadow-md cursor-pointer [color-scheme:light]"
-          />
+        <div className="absolute top-4 left-4 right-16 z-10 max-w-[min(30rem,calc(100%-5rem))]">
+          <div className="rounded-2xl border border-[#d8d1c1] bg-white/96 p-3 shadow-[0_18px_50px_rgba(31,24,11,0.16)] backdrop-blur">
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <label className="flex-1">
+                  <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.22em] text-[#7a6c54]">
+                    City
+                  </span>
+                  <select
+                    value={selectedCityId}
+                    onChange={handleCityChange}
+                    className="block w-full rounded-xl border border-[#e8e0cf] bg-[#fcfaf4] px-3 py-2.5 text-sm font-medium text-gray-800 outline-none transition focus:border-brand-amber"
+                  >
+                    {cities.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="sm:w-[12.5rem]">
+                  <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.22em] text-[#7a6c54]">
+                    Date
+                  </span>
+                  <div className="flex items-center gap-2 rounded-xl border border-[#e8e0cf] bg-[#fcfaf4] px-3 py-2.5">
+                    <CalendarDays className="h-4 w-4 text-[#9b875d]" />
+                    <input
+                      type="date"
+                      value={selectedDate}
+                      max={formatDateInputValue(new Date())}
+                      onChange={(e) => setSelectedDate(e.target.value)}
+                      className="w-full bg-transparent text-sm font-medium text-gray-800 outline-none [color-scheme:light]"
+                    />
+                  </div>
+                </label>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {DAY_PRESETS.map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => applyDayPreset(preset.offsetDays)}
+                    className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                      selectedDate ===
+                      formatDateInputValue(
+                        new Date(
+                          new Date().setDate(new Date().getDate() + preset.offsetDays),
+                        ),
+                      )
+                        ? "border-[#b98a2d] bg-[#1f1a10] text-[#f5d48b]"
+                        : "border-[#e8e0cf] bg-[#fcfaf4] text-[#6f5f42] hover:border-[#d6c5a7]"
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+                <span className="ml-auto rounded-full bg-[#f3ecdf] px-3 py-1.5 text-xs font-medium text-[#6f5f42]">
+                  {selectedDateLabel}
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="absolute top-4 right-4 z-10 flex flex-col gap-2">
@@ -219,7 +304,7 @@ const Explore: React.FC = () => {
         </div>
 
         {/* Time Slider */}
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-[80%] max-w-md bg-white/95 backdrop-blur border border-gray-200 p-4 rounded-xl shadow-2xl flex flex-col gap-2">
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-[86%] max-w-xl bg-white/95 backdrop-blur border border-gray-200 p-4 rounded-2xl shadow-2xl flex flex-col gap-3">
           {/* Weather Widget */}
           {weather && (
             <div className="absolute -top-14 right-0 bg-white/95 backdrop-blur border border-gray-200 p-2 px-4 rounded-lg shadow-lg flex items-center gap-3 text-sm text-gray-700">
@@ -238,11 +323,30 @@ const Explore: React.FC = () => {
             </div>
           )}
 
-          <div className="flex justify-between items-center text-sm">
-            <span className="text-gray-600">Viewing traffic at:</span>
-            <span className="font-bold text-gray-800 bg-gray-100 px-2 py-1 rounded">
+          <div className="flex items-center justify-between text-sm">
+            <div className="flex items-center gap-2 text-gray-600">
+              <Clock3 className="h-4 w-4 text-[#9b875d]" />
+              <span>Viewing traffic at</span>
+            </div>
+            <span className="rounded-full bg-[#f4ede1] px-3 py-1 text-sm font-bold text-gray-800">
               {formatTime(timeHour)}
             </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {TIME_PRESETS.map((preset) => (
+              <button
+                key={preset.label}
+                type="button"
+                onClick={() => setTimeHour(preset.hour)}
+                className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                  timeHour === preset.hour
+                    ? "border-[#b98a2d] bg-[#1f1a10] text-[#f5d48b]"
+                    : "border-gray-200 bg-[#faf7f0] text-gray-600 hover:border-[#d6c5a7]"
+                }`}
+              >
+                {preset.label}
+              </button>
+            ))}
           </div>
           <input
             type="range"
@@ -268,10 +372,6 @@ const Explore: React.FC = () => {
             city={city}
             summary={trafficSummary}
             onSegmentClick={setSelectedSegmentId}
-            onFetchComplete={() => {
-              // Nudge the map to reload by toggling the date string (force re-render)
-              setSelectedDate(prev => prev);
-            }}
           />
         )}
       </div>

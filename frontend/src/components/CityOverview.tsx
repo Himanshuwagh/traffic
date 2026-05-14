@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { type City } from '../data/mockData';
 import { type TrafficSummary } from './MapboxMap';
 import SegmentCard from './SegmentCard';
-import LiveTrafficPanel from './LiveTrafficPanel';
 import { BarChart2, Activity, TrendingDown } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -14,7 +13,6 @@ interface CityOverviewProps {
   city: City;
   summary: TrafficSummary | null;
   onSegmentClick: (id: string) => void;
-  onFetchComplete?: () => void;
 }
 
 interface HourlyBucket {
@@ -44,7 +42,7 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   );
 };
 
-const CityOverview: React.FC<CityOverviewProps> = ({ city, summary, onSegmentClick, onFetchComplete }) => {
+const CityOverview: React.FC<CityOverviewProps> = ({ city, summary, onSegmentClick }) => {
   const topBottlenecks = summary?.top_bottlenecks ?? [];
   const avgSpeed = summary?.avg_speed != null ? summary.avg_speed.toFixed(1) : 'N/A';
   const topCorridorName = summary?.top_corridor_name || 'N/A';
@@ -75,14 +73,9 @@ const CityOverview: React.FC<CityOverviewProps> = ({ city, summary, onSegmentCli
     loadHourlyChart();
   }, [loadHourlyChart]);
 
-  const handleFetchComplete = () => {
-    loadHourlyChart();
-    onFetchComplete?.();
-  };
-
   return (
     <div className="animate-in fade-in slide-in-from-right-4 duration-300">
-      <h2 className="text-xl font-semibold mb-6 text-white">{city.name} Real-Time Overview</h2>
+      <h2 className="text-xl font-semibold mb-6 text-white">{city.name} Traffic Overview</h2>
 
       {/* KPI cards */}
       <div className="grid grid-cols-2 gap-3 mb-6">
@@ -153,7 +146,7 @@ const CityOverview: React.FC<CityOverviewProps> = ({ city, summary, onSegmentCli
         ) : (
           <div className="h-[160px] flex flex-col items-center justify-center gap-2 text-gray-600 text-sm">
             <TrendingDown className="w-8 h-8 text-gray-700" />
-            <span>No traffic data yet — fetch some below</span>
+            <span>No stored traffic history available for this city yet.</span>
           </div>
         )}
 
@@ -164,11 +157,8 @@ const CityOverview: React.FC<CityOverviewProps> = ({ city, summary, onSegmentCli
         </div>
       </div>
 
-      {/* Live Fetch Panel */}
-      <LiveTrafficPanel cityId={city.id} onFetchComplete={handleFetchComplete} />
-
       {/* Top Bottlenecks */}
-      <h3 className="font-semibold mb-4 text-white">Top 10 Live Bottlenecks</h3>
+      <h3 className="font-semibold mb-4 text-white">Top 10 Bottlenecks</h3>
       <div className="space-y-3 pb-8">
         {topBottlenecks.map((feature, idx) => (
           <SegmentCard
@@ -183,7 +173,7 @@ const CityOverview: React.FC<CityOverviewProps> = ({ city, summary, onSegmentCli
         ))}
         {topBottlenecks.length === 0 && (
           <p className="text-gray-500 text-sm italic">
-            No active traffic data. Use "Fetch Now" above to pull real-time data.
+            No bottlenecks were recorded for the selected city, date, and hour.
           </p>
         )}
       </div>
