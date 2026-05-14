@@ -2,7 +2,7 @@
 
 A real-time urban traffic monitoring and analysis system. This guide will help you deploy the platform to the cloud.
 
- Done fetch states (fetch_india_districts.py):   Maharashtra, Andhra Pradesh, Arunachal Pradesh, Assam, Bihar, Chhattisgarh
+ Done fetch states (fetch_india_districts.py):   Maharashtra, Andhra Pradesh, Karnataka
 
 ## 🚀 Quick Deployment Guide
 
