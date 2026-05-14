@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Float, Text
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text
 from geoalchemy2 import Geometry
 try:
     from .database import Base
@@ -24,6 +24,78 @@ class TrafficData(Base):
     date = Column(DateTime)
     speed = Column(Float)  # km/h
     travel_time = Column(Float)  # seconds
+
+
+class TrafficObservation(Base):
+    __tablename__ = "traffic_observations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    observed_at = Column(DateTime, index=True)
+    source = Column(String, nullable=False, index=True)
+    source_kind = Column(String, nullable=False, index=True)
+    source_ref = Column(String, nullable=True, index=True)
+    road_segment_id = Column(Integer, nullable=True, index=True)
+    geometry = Column(Geometry('GEOMETRY', srid=4326))
+    city = Column(String, nullable=True, index=True)
+    speed_kmph = Column(Float, nullable=True)
+    free_flow_speed_kmph = Column(Float, nullable=True)
+    travel_time_seconds = Column(Float, nullable=True)
+    free_flow_travel_time_seconds = Column(Float, nullable=True)
+    confidence = Column(Float, nullable=True)
+    congestion_index = Column(Float, nullable=True, index=True)
+    jam_level = Column(String, nullable=True, index=True)
+    road_closure = Column(Boolean, nullable=True)
+    raw_payload = Column(Text, nullable=True)
+    raw_ttl_expires_at = Column(DateTime, nullable=True, index=True)
+
+
+class TrafficHotspot(Base):
+    __tablename__ = "traffic_hotspots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    city = Column(String, nullable=True, index=True)
+    name = Column(String, nullable=True)
+    geometry = Column(Geometry('GEOMETRY', srid=4326))
+    first_seen_at = Column(DateTime, nullable=True)
+    last_seen_at = Column(DateTime, nullable=True, index=True)
+    severity_score = Column(Float, nullable=True, index=True)
+    frequency_score = Column(Float, nullable=True)
+    duration_minutes = Column(Integer, nullable=True)
+    status = Column(String, nullable=True, index=True)
+    promoted_polling_until = Column(DateTime, nullable=True, index=True)
+
+
+class DailyHotspotStat(Base):
+    __tablename__ = "daily_hotspot_stats"
+
+    id = Column(Integer, primary_key=True, index=True)
+    hotspot_id = Column(Integer, nullable=False, index=True)
+    date = Column(Date, nullable=False, index=True)
+    peak_hour = Column(Integer, nullable=True)
+    avg_congestion_index = Column(Float, nullable=True)
+    max_congestion_index = Column(Float, nullable=True)
+    minutes_congested = Column(Integer, nullable=True)
+    sample_count = Column(Integer, nullable=True)
+    weather_summary = Column(Text, nullable=True)
+    incident_count = Column(Integer, nullable=True)
+
+
+class TomTomIngestionRun(Base):
+    __tablename__ = "tomtom_ingestion_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String, nullable=True, index=True)
+    started_at = Column(DateTime, nullable=True, index=True)
+    finished_at = Column(DateTime, nullable=True)
+    city = Column(String, nullable=True, index=True)
+    mode = Column(String, nullable=True, index=True)
+    tile_requests = Column(Integer, nullable=True)
+    non_tile_requests = Column(Integer, nullable=True)
+    observations_saved = Column(Integer, nullable=True)
+    observations_skipped = Column(Integer, nullable=True)
+    hotspots_updated = Column(Integer, nullable=True)
+    status = Column(String, nullable=True, index=True)
+    error_message = Column(Text, nullable=True)
 
 class TrafficSignal(Base):
     __tablename__ = "traffic_signals"

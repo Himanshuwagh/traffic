@@ -66,6 +66,8 @@ interface MapboxMapProps {
 export type TrafficSummary = {
   avg_speed: number | null;
   active_segments: number;
+  active_hotspots?: number;
+  worst_congestion_index?: number | null;
   top_corridor_name: string | null;
   status: string;
   top_bottlenecks: Array<{
@@ -74,6 +76,8 @@ export type TrafficSummary = {
     highway_type: string;
     speed: number | null;
     travel_time: number | null;
+    congestion_index?: number | null;
+    jam_level?: string | null;
     color: string;
     cfi: number;
   }>;

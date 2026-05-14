@@ -55,13 +55,18 @@ The frontend is a React app built with Vite.
 ---
 
 ### 4. Hourly Updates (GitHub Actions)
-To keep the traffic data fresh, we use GitHub Actions to fetch data every hour.
+To keep the traffic data fresh, GitHub Actions runs the TomTom hotspot-first ingestion job every hour.
 
 1.  In your GitHub repo, go to **Settings** -> **Secrets and variables** -> **Actions**.
 2.  Add two **Repository secrets**:
     *   `DATABASE_URL`: Same as Step 1.
-    *   `GOOGLE_API_KEY`: Same as Step 2.
-3.  The workflow is already set up in `.github/workflows/traffic-ingestion.yml`. It runs automatically every hour.
+    *   `TOMTOM_API_KEY`: Your TomTom API key.
+3.  The workflow is already set up in `.github/workflows/traffic-ingestion.yml`. It runs automatically every hour and only ingests when a discovery, tracking, or baseline window is due.
+
+The ingestion schedule is:
+*   Discovery: peak hours only, hourly per supported city.
+*   Tracking: active hotspot boxes every 3 hours.
+*   Baseline: off-peak samples at 13:00 and 22:00 IST.
 
 ---
 
@@ -71,10 +76,11 @@ To keep the traffic data fresh, we use GitHub Actions to fetch data every hour.
 If you already have road segments and signals data in your Supabase DB, **you do not need to run the fetch scripts again.** 
 
 The app is designed to:
-1.  **Read** from your existing tables.
-2.  **Only update** real-time traffic and weather data hourly via GitHub Actions.
+1.  **Read** from your existing road geometry tables.
+2.  **Update** normalized TomTom traffic observations hourly only when scheduled.
+3.  **Serve past date/time map views** from stored `traffic_observations`, not live provider calls.
 
-**Do not run** `python fetch_segments.py` or `python fetch_signals.py` if your database is already populated. Doing so might create duplicate records or unnecessary API calls.
+**Do not run** `python fetch_segments.py`, `python fetch_signals.py`, or `python fetch_india_districts.py` if your database is already populated. These are static reference imports and are not required for recurring TomTom traffic ingestion.
 
 ### "My database is empty, how do I start?"
 If you are starting with a fresh database:

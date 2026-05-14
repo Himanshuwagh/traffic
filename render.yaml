@@ -11,6 +11,8 @@ services:
         sync: false
       - key: GOOGLE_API_KEY
         sync: false
+      - key: TOMTOM_API_KEY
+        sync: false
       - key: ALLOWED_ORIGINS
         sync: false
       - key: AUTO_CREATE_INDEXES

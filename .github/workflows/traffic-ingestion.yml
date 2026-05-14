@@ -1,4 +1,4 @@
-name: Hourly Traffic Ingestion
+name: Hourly TomTom Traffic Ingestion
 
 on:
   workflow_dispatch:
@@ -21,8 +21,17 @@ jobs:
       - name: Install backend dependencies
         run: pip install -r backend/requirements.txt
 
-      - name: Run hourly traffic fetch
+      - name: Run hourly TomTom traffic ingestion
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-        run: python -m backend.fetch_traffic
+          TOMTOM_API_KEY: ${{ secrets.TOMTOM_API_KEY }}
+          TOMTOM_TILE_DAILY_LIMIT: "45000"
+          TOMTOM_NONTILE_DAILY_LIMIT: "2000"
+          TOMTOM_DISCOVERY_ZOOM: "12"
+          TOMTOM_HOTSPOT_ZOOM: "13"
+          TOMTOM_FLOW_STYLE: "relative-delay"
+          TOMTOM_CONGESTION_THRESHOLD: "0.35"
+          TOMTOM_PEAK_WINDOWS: "07:00-11:00,17:00-21:00"
+          TOMTOM_TRACKING_INTERVAL_HOURS: "3"
+          TOMTOM_BASELINE_HOURS: "13,22"
+        run: python -m backend.ingest_tomtom_traffic --mode auto

@@ -57,6 +57,27 @@ def get_traffic_color(speed):
         return "#FF0000"  # Red - congested
 
 
+def build_observation_filters(
+    *,
+    city: str | None,
+    bbox_vals: tuple[float, float, float, float] | None = None,
+    alias: str = "o",
+) -> tuple[str, dict]:
+    where_clauses: list[str] = []
+    params: dict = {}
+    if city:
+        where_clauses.append(f"LOWER({alias}.city) = LOWER(:city)")
+        params["city"] = city
+    if bbox_vals:
+        where_clauses.append(
+            f"{alias}.geometry && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)"
+        )
+        params.update(
+            {"min_lon": bbox_vals[0], "min_lat": bbox_vals[1], "max_lon": bbox_vals[2], "max_lat": bbox_vals[3]}
+        )
+    return (f"AND {' AND '.join(where_clauses)}" if where_clauses else ""), params
+
+
 def traffic_detail_for_zoom(zoom: float | None, requested_limit: int) -> tuple[tuple[str, ...] | None, int, float]:
     """
     Returns (highway_types, row_limit, simplify_tolerance) for a given map zoom.
@@ -258,19 +279,18 @@ async def get_traffic_by_date(
     limit: int = Query(default=20000, ge=1, le=50000),
     db: Session = Depends(get_db),
 ):
-    """Get traffic data for a specific date/time in ISO format"""
+    """Get normalized TomTom traffic observations for a specific date/time."""
     try:
         target_time = datetime.fromisoformat(date_str)
         bbox_vals = parse_bbox(bbox)
 
-        highway_types, limit, simplify_tolerance = traffic_detail_for_zoom(zoom, limit)
+        _, limit, simplify_tolerance = traffic_detail_for_zoom(zoom, limit)
         cache_key = (
             city.lower() if city else None,
             target_time.isoformat(timespec="hours"),
             round(zoom or 0, 1),
             limit,
             simplify_tolerance,
-            highway_types,
             rounded_bbox_key(bbox_vals),
         )
         now = time.monotonic()
@@ -283,36 +303,48 @@ async def get_traffic_by_date(
             "limit": limit,
             "simplify_tolerance": simplify_tolerance,
         }
-        where_sql, filter_params = build_common_filters(city=city, highway_types=highway_types, bbox_vals=bbox_vals)
+        observation_where, filter_params = build_observation_filters(city=city, bbox_vals=bbox_vals)
         params.update(filter_params)
 
         base_query = f"""
             WITH closest_traffic AS (
-                SELECT DISTINCT ON (td.segment_id)
-                    td.segment_id,
-                    td.speed,
-                    td.travel_time,
-                    td.date
-                FROM traffic_data td
-                WHERE td.date BETWEEN :target_time - INTERVAL '7 days' AND :target_time + INTERVAL '7 days'
-                ORDER BY td.segment_id, abs(extract(epoch from td.date - :target_time))
+                SELECT DISTINCT ON (COALESCE(o.road_segment_id, o.id))
+                    o.id,
+                    o.road_segment_id,
+                    o.geometry,
+                    o.speed_kmph,
+                    o.travel_time_seconds,
+                    o.congestion_index,
+                    o.jam_level,
+                    o.observed_at,
+                    COALESCE(rs.name, h.name, 'Unmatched traffic hotspot') AS name,
+                    COALESCE(rs.highway_type, 'traffic') AS highway_type
+                FROM traffic_observations o
+                LEFT JOIN road_segments rs ON rs.id = o.road_segment_id
+                LEFT JOIN traffic_hotspots h
+                    ON LOWER(h.city) = LOWER(o.city)
+                   AND ST_DWithin(h.geometry::geography, o.geometry::geography, 250)
+                WHERE o.observed_at BETWEEN :target_time - INTERVAL '7 days' AND :target_time + INTERVAL '7 days'
+                  AND o.geometry IS NOT NULL
+                  {observation_where}
+                ORDER BY COALESCE(o.road_segment_id, o.id), abs(extract(epoch from o.observed_at - :target_time))
             ),
             limited AS (
                 SELECT
-                    rs.id,
-                    rs.name,
-                    rs.highway_type,
+                    COALESCE(road_segment_id, id) AS id,
+                    name,
+                    highway_type,
                     CASE
-                        WHEN :simplify_tolerance > 0 THEN ST_SimplifyPreserveTopology(rs.geometry, :simplify_tolerance)
-                        ELSE rs.geometry
+                        WHEN :simplify_tolerance > 0 THEN ST_SimplifyPreserveTopology(geometry, :simplify_tolerance)
+                        ELSE geometry
                     END AS geometry,
-                    ct.speed,
-                    ct.travel_time,
-                    ct.date
-                FROM road_segments rs
-                JOIN closest_traffic ct ON ct.segment_id = rs.id
-                {where_sql}
-                ORDER BY rs.id
+                    speed_kmph,
+                    travel_time_seconds,
+                    congestion_index,
+                    jam_level,
+                    observed_at
+                FROM closest_traffic
+                ORDER BY COALESCE(congestion_index, 0) DESC, id
                 LIMIT :limit
             ),
             features AS (
@@ -323,14 +355,16 @@ async def get_traffic_by_date(
                         'id', id,
                         'name', COALESCE(name, 'Unknown'),
                         'highway_type', COALESCE(highway_type, 'unknown'),
-                        'speed', speed,
-                        'travel_time', travel_time,
+                        'speed', speed_kmph,
+                        'travel_time', travel_time_seconds,
+                        'congestion_index', congestion_index,
+                        'jam_level', jam_level,
                         'color', CASE
-                            WHEN speed IS NULL THEN '#888888'
-                            WHEN speed >= 40 THEN '#00C700'
-                            WHEN speed >= 25 THEN '#FFFF00'
-                            WHEN speed >= 15 THEN '#FF9900'
-                            ELSE '#FF0000'
+                            WHEN congestion_index IS NULL THEN '#a0a0b0'
+                            WHEN congestion_index >= 0.75 THEN '#FF0000'
+                            WHEN congestion_index >= 0.50 THEN '#FF9900'
+                            WHEN congestion_index >= 0.25 THEN '#FFFF00'
+                            ELSE '#00C700'
                         END
                     )
                 ) AS feature
@@ -366,14 +400,13 @@ async def get_traffic_summary(
         print(f"DEBUG: get_traffic_summary: date={date_str}, city={city}, zoom={zoom}, bbox={bbox}")
         target_time = datetime.fromisoformat(date_str)
         bbox_vals = parse_bbox(bbox)
-        highway_types, limit, _ = traffic_detail_for_zoom(zoom, limit)
+        _, limit, _ = traffic_detail_for_zoom(zoom, limit)
         cache_key = (
             "summary",
             city.lower() if city else None,
             target_time.isoformat(timespec="hours"),
             round(zoom or 0, 1),
             limit,
-            highway_types,
             rounded_bbox_key(bbox_vals),
         )
         now = time.monotonic()
@@ -381,32 +414,43 @@ async def get_traffic_summary(
         if cached:
             return cached
 
-        where_sql, filter_params = build_common_filters(city=city, highway_types=highway_types, bbox_vals=bbox_vals)
+        observation_where, filter_params = build_observation_filters(city=city, bbox_vals=bbox_vals)
         params = {"target_time": target_time, "limit": limit, **filter_params}
 
         query = text(
             f"""
             WITH closest_traffic AS (
-                SELECT DISTINCT ON (td.segment_id)
-                    td.segment_id,
-                    td.speed,
-                    td.travel_time,
-                    td.date
-                FROM traffic_data td
-                WHERE td.date BETWEEN :target_time - INTERVAL '7 days' AND :target_time + INTERVAL '7 days'
-                ORDER BY td.segment_id, abs(extract(epoch from td.date - :target_time))
+                SELECT DISTINCT ON (COALESCE(o.road_segment_id, o.id))
+                    o.id,
+                    o.road_segment_id,
+                    o.speed_kmph,
+                    o.travel_time_seconds,
+                    o.congestion_index,
+                    o.jam_level,
+                    o.observed_at,
+                    COALESCE(rs.name, h.name, 'Unmatched traffic hotspot') AS name,
+                    COALESCE(rs.highway_type, 'traffic') AS highway_type
+                FROM traffic_observations o
+                LEFT JOIN road_segments rs ON rs.id = o.road_segment_id
+                LEFT JOIN traffic_hotspots h
+                    ON LOWER(h.city) = LOWER(o.city)
+                   AND ST_DWithin(h.geometry::geography, o.geometry::geography, 250)
+                WHERE o.observed_at BETWEEN :target_time - INTERVAL '7 days' AND :target_time + INTERVAL '7 days'
+                  AND o.geometry IS NOT NULL
+                  {observation_where}
+                ORDER BY COALESCE(o.road_segment_id, o.id), abs(extract(epoch from o.observed_at - :target_time))
             ),
             visible_segments AS (
                 SELECT
-                    rs.id,
-                    COALESCE(rs.name, 'Unknown') AS name,
-                    COALESCE(rs.highway_type, 'unknown') AS highway_type,
-                    ct.speed,
-                    ct.travel_time
-                FROM road_segments rs
-                JOIN closest_traffic ct ON ct.segment_id = rs.id
-                {where_sql}
-                ORDER BY rs.id
+                    COALESCE(road_segment_id, id) AS id,
+                    name,
+                    highway_type,
+                    speed_kmph AS speed,
+                    travel_time_seconds AS travel_time,
+                    congestion_index,
+                    jam_level
+                FROM closest_traffic
+                ORDER BY COALESCE(congestion_index, 0) DESC, id
                 LIMIT :limit
             ),
             bottlenecks AS (
@@ -415,10 +459,12 @@ async def get_traffic_summary(
                     name,
                     highway_type,
                     speed,
-                    travel_time
+                    travel_time,
+                    congestion_index,
+                    jam_level
                 FROM visible_segments
-                WHERE speed IS NOT NULL
-                ORDER BY speed ASC, id ASC
+                WHERE congestion_index IS NOT NULL
+                ORDER BY congestion_index DESC, id ASC
                 LIMIT 10
             )
             SELECT jsonb_build_object(
@@ -427,10 +473,12 @@ async def get_traffic_summary(
                 'top_corridor_name', (
                     SELECT name
                     FROM bottlenecks
-                    ORDER BY speed ASC, id ASC
+                    ORDER BY congestion_index DESC, id ASC
                     LIMIT 1
                 ),
                 'status', 'live',
+                'active_hotspots', COUNT(*) FILTER (WHERE congestion_index >= 0.25),
+                'worst_congestion_index', ROUND((MAX(congestion_index) * 100)::numeric, 1),
                 'top_bottlenecks', COALESCE((
                     SELECT jsonb_agg(
                         jsonb_build_object(
@@ -439,16 +487,18 @@ async def get_traffic_summary(
                             'highway_type', highway_type,
                             'speed', speed,
                             'travel_time', travel_time,
+                            'congestion_index', congestion_index,
+                            'jam_level', jam_level,
                             'color', CASE
-                                WHEN speed IS NULL THEN '#888888'
-                                WHEN speed >= 40 THEN '#00C700'
-                                WHEN speed >= 25 THEN '#FFFF00'
-                                WHEN speed >= 15 THEN '#FF9900'
-                                ELSE '#FF0000'
+                                WHEN congestion_index IS NULL THEN '#a0a0b0'
+                                WHEN congestion_index >= 0.75 THEN '#FF0000'
+                                WHEN congestion_index >= 0.50 THEN '#FF9900'
+                                WHEN congestion_index >= 0.25 THEN '#FFFF00'
+                                ELSE '#00C700'
                             END,
-                            'cfi', GREATEST(0, 100 - COALESCE(speed, 0) * 2.5)
+                            'cfi', COALESCE(congestion_index, 0) * 100
                         )
-                        ORDER BY speed ASC, id ASC
+                        ORDER BY congestion_index DESC, id ASC
                     )
                     FROM bottlenecks
                 ), '[]'::jsonb)
@@ -462,6 +512,8 @@ async def get_traffic_summary(
             "active_segments": 0,
             "top_corridor_name": None,
             "status": "live",
+            "active_hotspots": 0,
+            "worst_congestion_index": None,
             "top_bottlenecks": [],
         }
         store_cached_response(traffic_summary_cache, cache_key, summary, now)
@@ -473,6 +525,8 @@ async def get_traffic_summary(
             "active_segments": 0,
             "top_corridor_name": None,
             "status": "unavailable",
+            "active_hotspots": 0,
+            "worst_congestion_index": None,
             "top_bottlenecks": [],
         }
 
@@ -524,13 +578,8 @@ async def get_traffic_tile(
                 headers={"Cache-Control": "public, max-age=60"},
             )
 
-        # Build city WHERE clause only (no highway_type filter — all types shown at all zooms)
-        city_clauses: list[str] = []
-        filter_params: dict = {}
-        if city:
-            city_clauses.append("LOWER(rs.city) = LOWER(:city)")
-            filter_params["city"] = city
-        city_where = ("WHERE " + " AND ".join(city_clauses)) if city_clauses else ""
+        city_filter = "AND LOWER(o.city) = LOWER(:city)" if city else ""
+        filter_params: dict = {"city": city} if city else {}
 
         params = {
             "target_time": target_time,
@@ -550,57 +599,59 @@ async def get_traffic_tile(
                     ST_TileEnvelope(:z, :x, :y)                        AS bounds_3857,
                     ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326)    AS bounds_4326
             ),
-            -- ── 2. Find segments inside this tile (GiST spatial index + city/hw filter) ─
-            --    This is cheap: uses the spatial index and returns at most a few hundred rows.
-            tile_segs AS (
+            -- ── 2. Find normalized traffic observations inside this tile ───────
+            tile_observations AS (
                 SELECT
-                    rs.id,
-                    rs.name,
-                    rs.highway_type,
-                    rs.geometry
-                FROM road_segments rs, bounds
-                {city_where}
-                  AND rs.geometry && bounds.bounds_4326
+                    o.id,
+                    o.road_segment_id,
+                    o.geometry,
+                    o.speed_kmph,
+                    o.travel_time_seconds,
+                    o.congestion_index,
+                    o.jam_level,
+                    COALESCE(rs.name, h.name, 'Unmatched traffic hotspot') AS name,
+                    COALESCE(rs.highway_type, 'traffic') AS highway_type
+                FROM traffic_observations o
+                LEFT JOIN road_segments rs ON rs.id = o.road_segment_id
+                LEFT JOIN traffic_hotspots h
+                    ON LOWER(h.city) = LOWER(o.city)
+                   AND ST_DWithin(h.geometry::geography, o.geometry::geography, 250)
+                CROSS JOIN bounds
+                WHERE o.observed_at BETWEEN :target_time - INTERVAL '3 hours'
+                                        AND :target_time + INTERVAL '3 hours'
+                  AND o.geometry && bounds.bounds_4326
+                  {city_filter}
             ),
-            -- ── 3. Fetch traffic ONLY for segments found in step 2 ─────────────────
-            --    Joining on segment_id first narrows the traffic_data scan to a tiny
-            --    subset (10-200 rows per tile) instead of scanning millions of rows.
-            --    The ±3-hour window keeps the date range scan on the covering index small.
+            -- ── 3. Pick the closest/current best observation per road/ref ───────
             closest_traffic AS (
-                SELECT DISTINCT ON (td.segment_id)
-                    td.segment_id,
-                    td.speed,
-                    td.travel_time
-                FROM tile_segs ts
-                JOIN traffic_data td ON td.segment_id = ts.id
-                WHERE td.date BETWEEN :target_time - INTERVAL '3 hours'
-                                  AND :target_time + INTERVAL '3 hours'
-                ORDER BY td.segment_id,
-                         abs(extract(epoch from td.date - :target_time))
+                SELECT DISTINCT ON (COALESCE(road_segment_id, id))
+                    *
+                FROM tile_observations
+                ORDER BY COALESCE(road_segment_id, id), COALESCE(congestion_index, 0) DESC
             ),
             -- ── 4. Build MVT geometry ──────────────────────────────────────────
             tile_rows AS (
                 SELECT
-                    ts.id,
-                    COALESCE(ts.name, 'Unknown')       AS name,
-                    COALESCE(ts.highway_type, 'unknown') AS highway_type,
-                    ct.speed,
-                    ct.travel_time,
-                    -- LEFT JOIN: roads without traffic data get a neutral gray so the
-                    -- road skeleton is always rendered without a separate geometry source.
+                    COALESCE(ct.road_segment_id, ct.id) AS id,
+                    COALESCE(ct.name, 'Unknown') AS name,
+                    COALESCE(ct.highway_type, 'traffic') AS highway_type,
+                    ct.speed_kmph AS speed,
+                    ct.travel_time_seconds AS travel_time,
+                    ct.congestion_index,
+                    ct.jam_level,
                     CASE
-                        WHEN ct.speed IS NULL  THEN '#a0a0b0'
-                        WHEN ct.speed >= 40    THEN '#00C700'
-                        WHEN ct.speed >= 25    THEN '#FFFF00'
-                        WHEN ct.speed >= 15    THEN '#FF9900'
-                        ELSE                       '#FF0000'
+                        WHEN ct.congestion_index IS NULL THEN '#a0a0b0'
+                        WHEN ct.congestion_index >= 0.75 THEN '#FF0000'
+                        WHEN ct.congestion_index >= 0.50 THEN '#FF9900'
+                        WHEN ct.congestion_index >= 0.25 THEN '#FFFF00'
+                        ELSE '#00C700'
                     END AS color,
                     ST_AsMVTGeom(
                         ST_Transform(
                             CASE
                                 WHEN :simplify_tolerance > 0
-                                    THEN ST_SimplifyPreserveTopology(ts.geometry, :simplify_tolerance)
-                                ELSE ts.geometry
+                                    THEN ST_SimplifyPreserveTopology(ct.geometry, :simplify_tolerance)
+                                ELSE ct.geometry
                             END,
                             3857
                         ),
@@ -609,8 +660,7 @@ async def get_traffic_tile(
                         256,    -- buffer (needed for anti-aliased lines at tile edges)
                         true    -- clip
                     ) AS geom
-                FROM tile_segs ts
-                LEFT JOIN closest_traffic ct ON ct.segment_id = ts.id
+                FROM closest_traffic ct
                 CROSS JOIN bounds
             )
             SELECT ST_AsMVT(tile_rows, '{MVT_LAYER_NAME}', 4096, 'geom')
@@ -629,6 +679,82 @@ async def get_traffic_tile(
     except Exception as e:
         print(f"TILE ERROR z={z} x={x} y={y}: {e}")
         return Response(content=b"", media_type="application/vnd.mapbox-vector-tile", status_code=200)
+
+
+@router.get("/api/hotspots/{date_str}")
+async def get_hotspots(
+    date_str: str,
+    city: str | None = None,
+    bbox: str | None = Query(default=None, description="minLon,minLat,maxLon,maxLat"),
+    limit: int = Query(default=25, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """Return hotspot summaries for the selected date/time and visible area."""
+    try:
+        target_time = datetime.fromisoformat(date_str)
+        bbox_vals = parse_bbox(bbox)
+        where_clauses: list[str] = [
+            "h.last_seen_at BETWEEN :target_time - INTERVAL '7 days' AND :target_time + INTERVAL '7 days'"
+        ]
+        params: dict = {"target_time": target_time, "limit": limit}
+        if city:
+            where_clauses.append("LOWER(h.city) = LOWER(:city)")
+            params["city"] = city
+        if bbox_vals:
+            where_clauses.append("h.geometry && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)")
+            params.update(
+                {"min_lon": bbox_vals[0], "min_lat": bbox_vals[1], "max_lon": bbox_vals[2], "max_lat": bbox_vals[3]}
+            )
+
+        rows = db.execute(
+            text(
+                f"""
+                SELECT
+                    h.id,
+                    h.city,
+                    COALESCE(h.name, 'Traffic hotspot') AS name,
+                    ST_AsGeoJSON(ST_Centroid(h.geometry), 5)::text AS centroid,
+                    h.severity_score,
+                    h.frequency_score,
+                    h.duration_minutes,
+                    h.status,
+                    h.last_seen_at,
+                    ds.peak_hour,
+                    ds.avg_congestion_index,
+                    ds.max_congestion_index,
+                    ds.minutes_congested
+                FROM traffic_hotspots h
+                LEFT JOIN daily_hotspot_stats ds
+                    ON ds.hotspot_id = h.id
+                   AND ds.date = CAST(:target_time AS date)
+                WHERE {" AND ".join(where_clauses)}
+                ORDER BY h.severity_score DESC NULLS LAST, h.last_seen_at DESC NULLS LAST
+                LIMIT :limit
+                """
+            ),
+            params,
+        ).fetchall()
+
+        hotspots = []
+        for row in rows:
+            hotspots.append({
+                "id": row.id,
+                "city": row.city,
+                "name": row.name,
+                "centroid": json.loads(row.centroid) if row.centroid else None,
+                "severity_score": row.severity_score,
+                "frequency_score": row.frequency_score,
+                "duration_minutes": row.duration_minutes,
+                "status": row.status,
+                "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
+                "peak_hour": row.peak_hour,
+                "avg_congestion_index": row.avg_congestion_index,
+                "max_congestion_index": row.max_congestion_index,
+                "minutes_congested": row.minutes_congested,
+            })
+        return {"hotspots": hotspots}
+    except Exception as e:
+        return {"error": str(e), "hotspots": []}
 
 
 @router.get("/api/segments/tiles/{z}/{x}/{y}.mvt")
@@ -669,7 +795,7 @@ async def get_segment_tile(
         if city:
             city_clauses.append("LOWER(rs.city) = LOWER(:city)")
             filter_params["city"] = city
-        city_where = ("WHERE " + " AND ".join(city_clauses)) if city_clauses else ""
+        city_where = ("WHERE " + " AND ".join(city_clauses)) if city_clauses else "WHERE TRUE"
 
         params = {
             "z": z,

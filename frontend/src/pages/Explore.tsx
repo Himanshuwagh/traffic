@@ -158,7 +158,7 @@ const Explore: React.FC = () => {
 
         <div className="absolute bottom-24 left-4 z-10 bg-white/95 backdrop-blur border border-gray-200 p-3 rounded-lg shadow-lg">
           <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">
-            Traffic Legend
+            Congestion Legend
           </p>
           <div className="space-y-1 text-[10px] text-gray-700">
             <div className="flex items-center gap-2">
@@ -166,28 +166,35 @@ const Explore: React.FC = () => {
                 className="w-4 h-3 rounded"
                 style={{ backgroundColor: "#00C700" }}
               />
-              <span>Free (≥40 km/h)</span>
+              <span>Free</span>
             </div>
             <div className="flex items-center gap-2">
               <div
                 className="w-4 h-3 rounded border border-gray-300"
                 style={{ backgroundColor: "#FFFF00" }}
               />
-              <span>Moderate (25-40 km/h)</span>
+              <span>Moderate</span>
             </div>
             <div className="flex items-center gap-2">
               <div
                 className="w-4 h-3 rounded"
                 style={{ backgroundColor: "#FF9900" }}
               />
-              <span>Heavy (15-25 km/h)</span>
+              <span>Heavy</span>
             </div>
             <div className="flex items-center gap-2">
               <div
                 className="w-4 h-3 rounded"
                 style={{ backgroundColor: "#FF0000" }}
               />
-              <span>Congested ({"<"}15 km/h)</span>
+              <span>Severe</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div
+                className="w-4 h-3 rounded"
+                style={{ backgroundColor: "#a0a0b0" }}
+              />
+              <span>Unknown</span>
             </div>
           </div>
         </div>

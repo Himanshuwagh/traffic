@@ -49,7 +49,10 @@ const CityOverview: React.FC<CityOverviewProps> = ({ city, summary, onSegmentCli
   const avgSpeed = summary?.avg_speed != null ? summary.avg_speed.toFixed(1) : 'N/A';
   const topCorridorName = summary?.top_corridor_name || 'N/A';
   const activeSegments = summary?.active_segments ?? 0;
-  const statusLabel = summary?.status === 'live' ? 'Live' : 'Loading';
+  const activeHotspots = summary?.active_hotspots ?? activeSegments;
+  const worstCongestion =
+    summary?.worst_congestion_index != null ? `${Math.round(summary.worst_congestion_index)} CFI` : 'N/A';
+  const statusLabel = summary?.status === 'live' ? 'Live Data' : 'Loading';
   const statusColor = summary?.status === 'live' ? 'text-[#10B981]' : 'text-gray-400';
 
   const [hourlyData, setHourlyData] = useState<HourlyBucket[]>([]);
@@ -88,18 +91,18 @@ const CityOverview: React.FC<CityOverviewProps> = ({ city, summary, onSegmentCli
           <p className="font-semibold text-sm truncate text-white" title={topCorridorName}>{topCorridorName}</p>
         </div>
         <div className="card p-4">
-          <p className="label-text mb-1 text-[10px] text-gray-500 uppercase tracking-wider">Avg city speed</p>
+          <p className="label-text mb-1 text-[10px] text-gray-500 uppercase tracking-wider">Avg observed speed</p>
           <p className="font-semibold text-2xl text-white">{avgSpeed} <span className="text-sm font-normal text-gray-400">km/h</span></p>
         </div>
         <div className="card p-4">
-          <p className="label-text mb-1 text-[10px] text-gray-500 uppercase tracking-wider">Active segments</p>
-          <p className="font-semibold text-lg text-white">{activeSegments.toLocaleString()}</p>
+          <p className="label-text mb-1 text-[10px] text-gray-500 uppercase tracking-wider">Active hotspots</p>
+          <p className="font-semibold text-lg text-white">{activeHotspots}</p>
         </div>
         <div className="card p-4">
-          <p className="label-text mb-1 text-[10px] text-gray-500 uppercase tracking-wider">Data status</p>
+          <p className="label-text mb-1 text-[10px] text-gray-500 uppercase tracking-wider">Worst congestion</p>
           <p className={`font-semibold text-lg ${statusColor} flex items-center gap-1.5`}>
             <Activity className="w-4 h-4" />
-            {statusLabel}
+            {worstCongestion === 'N/A' ? statusLabel : worstCongestion}
           </p>
         </div>
       </div>
@@ -173,7 +176,7 @@ const CityOverview: React.FC<CityOverviewProps> = ({ city, summary, onSegmentCli
             rank={idx + 1}
             name={feature.name || 'Unknown Road'}
             cfi={Math.round(feature.cfi)}
-            statLabel="Current speed"
+            statLabel={feature.jam_level ? `${feature.jam_level} congestion` : 'Observed speed'}
             statValue={feature.speed != null ? `${Math.round(feature.speed)} km/h` : 'N/A'}
             onClick={() => onSegmentClick(String(feature.id))}
           />

@@ -55,6 +55,12 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_traffic_data_seg_date_covering ON traffic_data (segment_id, date, speed, travel_time)",
         # Date-only index for any remaining range scans
         "CREATE INDEX IF NOT EXISTS idx_traffic_data_date ON traffic_data (date)",
+        "CREATE INDEX IF NOT EXISTS idx_traffic_observations_city_time ON traffic_observations (LOWER(city), observed_at)",
+        "CREATE INDEX IF NOT EXISTS idx_traffic_observations_road_time ON traffic_observations (road_segment_id, observed_at)",
+        "CREATE INDEX IF NOT EXISTS idx_traffic_observations_jam_time ON traffic_observations (jam_level, observed_at)",
+        "CREATE INDEX IF NOT EXISTS idx_traffic_hotspots_city_status ON traffic_hotspots (LOWER(city), status)",
+        "CREATE INDEX IF NOT EXISTS idx_daily_hotspot_stats_hotspot_date ON daily_hotspot_stats (hotspot_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_tomtom_runs_day_mode ON tomtom_ingestion_runs (started_at, mode)",
         "CREATE INDEX IF NOT EXISTS idx_traffic_signals_city_lower ON traffic_signals (LOWER(city))",
         "CREATE INDEX IF NOT EXISTS idx_weather_data_city_timestamp ON weather_data (LOWER(city), timestamp)",
     ]
