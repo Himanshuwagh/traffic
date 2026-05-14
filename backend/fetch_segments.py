@@ -1,7 +1,9 @@
 import logging
 import os
+import time
 
 import osmnx as ox
+from shapely.geometry import LineString, MultiLineString
 from sqlalchemy import text
 
 try:
@@ -22,6 +24,21 @@ MAJOR_INDIAN_CITIES = [
 ]
 
 INSERT_BATCH_SIZE = max(1, int(os.getenv("SEGMENT_INSERT_BATCH_SIZE", "500")))
+OVERPASS_TIMEOUT_SECONDS = max(60, int(os.getenv("OSMNX_TIMEOUT_SECONDS", "180")))
+OVERPASS_MEMORY_MB = max(256, int(os.getenv("OSMNX_OVERPASS_MEMORY_MB", "2048")))
+CITY_FETCH_RETRIES = max(1, int(os.getenv("CITY_FETCH_RETRIES", "3")))
+CITY_RETRY_SLEEP_SECONDS = max(5, int(os.getenv("CITY_RETRY_SLEEP_SECONDS", "20")))
+
+# Match the district importer: keep only major traffic-relevant road classes.
+_DEFAULT_HIGHWAY_FILTER = (
+    "motorway|motorway_link"
+    "|trunk|trunk_link"
+    "|primary|primary_link"
+    "|secondary|secondary_link"
+    "|tertiary|tertiary_link"
+)
+HIGHWAY_FILTER = os.getenv("HIGHWAY_FILTER", _DEFAULT_HIGHWAY_FILTER)
+OSMNX_CUSTOM_FILTER = f'["highway"~"{HIGHWAY_FILTER}"]'
 
 
 def print_progress(iteration: int, total: int, prefix: str = '', suffix: str = '', length: int = 40) -> None:
@@ -53,11 +70,54 @@ def _flush_segment_batch(db, query, batch_params: list[dict], short_city_name: s
     return total_saved
 
 
+def _iter_lines(geom) -> list[LineString]:
+    if isinstance(geom, LineString):
+        return [geom]
+    if isinstance(geom, MultiLineString):
+        return [line for line in geom.geoms if isinstance(line, LineString)]
+    return []
+
+
 def fetch_segments_for_city(city_query: str) -> bool:
     logging.info(f'Fetching road network for "{city_query}" (15km radius) from OSMnx...')
+    logging.info('Highway filter for "%s": %s', city_query, HIGHWAY_FILTER)
     try:
-        # Use graph_from_address with a radius to be more reliable than boundary polygons
-        G = ox.graph_from_address(city_query, dist=15000, network_type='drive', simplify=True)
+        # Use graph_from_address with a radius to be more reliable than boundary polygons,
+        # but constrain the query to major traffic-relevant road classes only.
+        ox.settings.requests_timeout = OVERPASS_TIMEOUT_SECONDS
+        ox.settings.overpass_settings = (
+            f'[out:json][timeout:{OVERPASS_TIMEOUT_SECONDS}][maxsize:{OVERPASS_MEMORY_MB * 1024 * 1024}]'
+        )
+
+        G = None
+        last_error = None
+        for attempt in range(1, CITY_FETCH_RETRIES + 1):
+            try:
+                G = ox.graph_from_address(
+                    city_query,
+                    dist=15000,
+                    custom_filter=OSMNX_CUSTOM_FILTER,
+                    simplify=True,
+                    retain_all=True,
+                )
+                if G is not None:
+                    break
+            except Exception as exc:
+                last_error = exc
+                logging.warning(
+                    'OSMnx city fetch failed for "%s" on attempt %d/%d: %s',
+                    city_query,
+                    attempt,
+                    CITY_FETCH_RETRIES,
+                    exc,
+                )
+                if attempt < CITY_FETCH_RETRIES:
+                    sleep_for = CITY_RETRY_SLEEP_SECONDS * attempt
+                    logging.info('Retrying city fetch for "%s" after %ds…', city_query, sleep_for)
+                    time.sleep(sleep_for)
+
+        if G is None:
+            raise RuntimeError(last_error or f"Could not fetch graph for {city_query}")
 
         # Convert to GeoDataFrame
         gdf = ox.graph_to_gdfs(G, nodes=False)
@@ -95,8 +155,8 @@ def fetch_segments_for_city(city_query: str) -> bool:
                 if processed % 100 == 0:
                     print_progress(processed, total_rows, prefix='Processing', suffix=f'{processed}/{total_rows}')
 
-                geom = row.geometry
-                if geom.geom_type != 'LineString':
+                geoms = _iter_lines(row.geometry)
+                if not geoms:
                     continue
 
                 name = row.get('name', 'Unknown')
@@ -117,17 +177,18 @@ def fetch_segments_for_city(city_query: str) -> bool:
                 oneway_raw = row.get('oneway', False)
                 oneway = str(oneway_raw[0] if isinstance(oneway_raw, list) else oneway_raw)
 
-                batch_params.append({
-                    'name': str(name),
-                    'city': short_city_name,
-                    'wkt': geom.wkt,
-                    'lanes': lanes,
-                    'highway_type': str(highway_type),
-                    'oneway': str(oneway),
-                })
+                for geom in geoms:
+                    batch_params.append({
+                        'name': str(name),
+                        'city': short_city_name,
+                        'wkt': geom.wkt,
+                        'lanes': lanes,
+                        'highway_type': str(highway_type),
+                        'oneway': str(oneway),
+                    })
 
-                if len(batch_params) >= INSERT_BATCH_SIZE:
-                    total_saved = _flush_segment_batch(db, insert_query, batch_params, short_city_name, total_saved)
+                    if len(batch_params) >= INSERT_BATCH_SIZE:
+                        total_saved = _flush_segment_batch(db, insert_query, batch_params, short_city_name, total_saved)
 
             if total_rows > 0:
                 print_progress(total_rows, total_rows, prefix='Processing', suffix=f'{total_rows}/{total_rows}')

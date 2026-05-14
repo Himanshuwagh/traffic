@@ -286,6 +286,8 @@ const buildDateTimeKey = (date: string, hour: number): string => {
 };
 
 const roundCoord = (v: number) => Number(v.toFixed(4));
+const PREWARM_TILE_RADIUS = 1;
+const PREWARM_ALL_CITY_RADIUS = 0;
 
 const CITY_SWITCH_DISTANCE_KM = 60;
 
@@ -315,6 +317,60 @@ const paddedBounds = (b: mapboxgl.LngLatBounds): string => {
     roundCoord(e + lp),
     roundCoord(n + bp),
   ].join(",");
+};
+
+const cityPaddedBounds = (city: City): string => {
+  const lngPad = 0.18;
+  const latPad = 0.14;
+  return [
+    roundCoord(city.center[0] - lngPad),
+    roundCoord(city.center[1] - latPad),
+    roundCoord(city.center[0] + lngPad),
+    roundCoord(city.center[1] + latPad),
+  ].join(",");
+};
+
+const lngLatToTile = (lng: number, lat: number, zoom: number) => {
+  const latRad = (lat * Math.PI) / 180;
+  const scale = 2 ** zoom;
+  const x = Math.floor(((lng + 180) / 360) * scale);
+  const y = Math.floor(
+    ((1 - Math.asinh(Math.tan(latRad)) / Math.PI) / 2) * scale,
+  );
+  return { x, y };
+};
+
+const buildCityTileUrls = (
+  cityId: string,
+  city: City,
+  dateStr: string,
+  radius: number,
+) => {
+  const zoom = Math.max(8, Math.min(14, Math.round(city.zoom)));
+  const centerTile = lngLatToTile(city.center[0], city.center[1], zoom);
+  const trafficUrls: string[] = [];
+  const segmentUrls: string[] = [];
+
+  for (let dx = -radius; dx <= radius; dx += 1) {
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      const x = centerTile.x + dx;
+      const y = centerTile.y + dy;
+      trafficUrls.push(
+        apiUrl(
+          `/api/traffic/tiles/${dateStr}/${zoom}/${x}/${y}.mvt?city=${encodeURIComponent(cityId)}`,
+        ),
+      );
+      if (!TILE_SERVER_URL) {
+        segmentUrls.push(
+          apiUrl(
+            `/api/segments/tiles/${zoom}/${x}/${y}.mvt?city=${encodeURIComponent(cityId)}`,
+          ),
+        );
+      }
+    }
+  }
+
+  return { trafficUrls, segmentUrls };
 };
 
 type VecSource = mapboxgl.VectorTileSource & {
@@ -362,6 +418,8 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
   const map = useRef<mapboxgl.Map | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
   const lastSummaryKey = useRef<string>("");
+  const prewarmedUrls = useRef<Set<string>>(new Set());
+  const prefetchedSummaries = useRef<Map<string, TrafficSummary>>(new Map());
 
   // ── 1. Init map once ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -477,6 +535,75 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
       map.current?.off("moveend", updateViewportCity);
     };
   }, [cityId, knownCities, mapLoaded, onViewportCityChange]);
+
+  useEffect(() => {
+    if (!onSummaryLoaded) return;
+    const dateStr = buildDateTimeKey(selectedDate, timeHour);
+    const cached = prefetchedSummaries.current.get(`${cityId}|${dateStr}`);
+    if (cached) onSummaryLoaded(cached);
+  }, [cityId, selectedDate, timeHour, onSummaryLoaded]);
+
+  useEffect(() => {
+    if (!mapLoaded) return;
+
+    const dateStr = buildDateTimeKey(selectedDate, timeHour);
+    const prioritizedCities = [
+      city,
+      ...knownCities.filter((candidate) => candidate.id !== city.id),
+    ];
+
+    const controller = new AbortController();
+    const warm = async () => {
+      for (const candidate of prioritizedCities) {
+        const radius =
+          candidate.id === city.id ? PREWARM_TILE_RADIUS : PREWARM_ALL_CITY_RADIUS;
+        const { trafficUrls, segmentUrls } = buildCityTileUrls(
+          candidate.id,
+          candidate,
+          dateStr,
+          radius,
+        );
+        const urls = [
+          ...trafficUrls,
+          ...segmentUrls,
+          apiUrl(
+            `/api/traffic/summary/${dateStr}?city=${encodeURIComponent(candidate.id)}&bbox=${encodeURIComponent(cityPaddedBounds(candidate))}&zoom=${Math.max(8, Math.min(14, Math.round(candidate.zoom)))}`,
+          ),
+          apiUrl(`/api/signals?city=${encodeURIComponent(candidate.id)}`),
+        ];
+
+        await Promise.all(
+          urls.map(async (url) => {
+            if (prewarmedUrls.current.has(url)) return;
+            prewarmedUrls.current.add(url);
+            try {
+              const response = await fetch(url, {
+                signal: controller.signal,
+                credentials: "omit",
+                cache: "force-cache",
+              });
+              if (url.includes("/api/traffic/summary/")) {
+                const summary = (await response.json()) as TrafficSummary & {
+                  error?: string;
+                };
+                if (!summary.error) {
+                  prefetchedSummaries.current.set(
+                    `${candidate.id}|${dateStr}`,
+                    summary,
+                  );
+                }
+              }
+            } catch {
+              prewarmedUrls.current.delete(url);
+            }
+          }),
+        );
+      }
+    };
+
+    warm();
+    return () => controller.abort();
+  }, [city, knownCities, mapLoaded, selectedDate, timeHour]);
 
   // ── 3. BASE layer — road skeleton from Worker tile server or API fallback ───
   //

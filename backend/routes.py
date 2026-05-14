@@ -12,7 +12,7 @@ except ImportError:
 
 router = APIRouter()
 
-TRAFFIC_CACHE_TTL_SECONDS = 30
+TRAFFIC_CACHE_TTL_SECONDS = 300
 TRAFFIC_CACHE_MAX_ENTRIES = 128
 traffic_response_cache: dict[tuple, tuple[float, str]] = {}
 traffic_summary_cache: dict[tuple, tuple[float, dict]] = {}
