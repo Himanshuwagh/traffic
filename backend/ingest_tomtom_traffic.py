@@ -574,6 +574,11 @@ def ingest_city(client: TomTomClient, city: str, mode: str, observed_at: datetim
         if mode == "tracking":
             zoom = int(os.getenv("TOMTOM_HOTSPOT_ZOOM", "13"))
             bboxes = _active_hotspot_bboxes(db, city) or []
+        # Bootstrap behavior: if tracking is scheduled but no hotspots exist yet,
+        # fall back to a small discovery scan so we start collecting observations.
+        if not bboxes and mode == "tracking" and os.getenv("TOMTOM_TRACKING_BOOTSTRAP_DISCOVERY", "true").lower() in {"1", "true", "yes", "on"}:
+            zoom = int(os.getenv("TOMTOM_DISCOVERY_ZOOM", "12"))
+            bboxes = [SUPPORTED_CITIES[city]["bbox"]]
         if not bboxes:
             _record_run(
                 db,
