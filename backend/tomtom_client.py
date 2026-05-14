@@ -51,8 +51,10 @@ class TomTomClient:
         if use_cache and cache_file.exists():
             return cache_file.read_bytes()
 
+        # TomTom Vector Flow Tiles endpoint:
+        #   /traffic/map/4/tile/flow/{type}/{z}/{x}/{y}.pbf
         url = (
-            f"{TOMTOM_API_BASE}/map/4/tile/flow/"
+            f"{TOMTOM_API_BASE}/traffic/map/4/tile/flow/"
             f"{self.flow_style}/{tile.z}/{tile.x}/{tile.y}.pbf"
         )
         response = requests.get(
