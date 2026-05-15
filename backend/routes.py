@@ -38,6 +38,8 @@ HW_MINOR      = HW_TERTIARY + (
     "residential",
     "living_street",
     "service",
+    "traffic",
+    "unknown",
 )
 
 # Legacy aliases kept so nothing else breaks
@@ -84,18 +86,16 @@ def traffic_detail_for_zoom(zoom: float | None, requested_limit: int) -> tuple[t
     """
     Returns (highway_types, row_limit, simplify_tolerance) for a given map zoom.
 
-    Highway type filtering is DISABLED — all road segments are returned at every
-    zoom level. Only geometry simplification varies with zoom to keep tile sizes
-    reasonable at low zoom levels.
+    Road classes progressively unlock by zoom. This keeps country/state views
+    readable and makes live tile payloads match the frontend reveal hierarchy.
     """
-    # Always return all road types (highway_types=None means no type filter)
     if zoom is None or zoom < 9:
-        return None, min(requested_limit, 50000), 0.0006
+        return HW_PRIMARY, min(requested_limit, 50000), 0.0006
     if zoom < 12:
-        return None, min(requested_limit, 50000), 0.0002
+        return HW_SECONDARY, min(requested_limit, 50000), 0.0002
     if zoom < 14:
-        return None, min(requested_limit, 50000), 0.00005
-    return None, min(requested_limit, 50000), 0.0
+        return HW_TERTIARY, min(requested_limit, 50000), 0.00005
+    return HW_MINOR, min(requested_limit, 50000), 0.0
 
 
 def rounded_bbox_key(bbox_vals: tuple[float, float, float, float] | None) -> tuple[float, ...] | None:
@@ -302,7 +302,7 @@ async def get_traffic_by_date(
         target_time = datetime.fromisoformat(date_str)
         bbox_vals = parse_bbox(bbox)
 
-        _, limit, simplify_tolerance = traffic_detail_for_zoom(zoom, limit)
+        highway_types, limit, simplify_tolerance = traffic_detail_for_zoom(zoom, limit)
         cache_key = (
             city.lower() if city else None,
             target_time.isoformat(timespec="hours"),
@@ -321,8 +321,14 @@ async def get_traffic_by_date(
             "limit": limit,
             "simplify_tolerance": simplify_tolerance,
         }
+        if highway_types:
+            params["highway_types"] = list(highway_types)
         observation_where, filter_params = build_observation_filters(city=city, bbox_vals=bbox_vals)
         params.update(filter_params)
+        highway_where = (
+            "AND COALESCE(rs.highway_type, 'traffic') = ANY(CAST(:highway_types AS text[]))"
+            if highway_types else ""
+        )
 
         base_query = f"""
             WITH closest_traffic AS (
@@ -345,6 +351,7 @@ async def get_traffic_by_date(
                 WHERE o.observed_at BETWEEN :target_time - INTERVAL '7 days' AND :target_time + INTERVAL '7 days'
                   AND o.geometry IS NOT NULL
                   {observation_where}
+                  {highway_where}
                 ORDER BY COALESCE(o.road_segment_id, o.id), abs(extract(epoch from o.observed_at - :target_time))
             ),
             limited AS (
@@ -418,7 +425,7 @@ async def get_traffic_summary(
         print(f"DEBUG: get_traffic_summary: date={date_str}, city={city}, zoom={zoom}, bbox={bbox}")
         target_time = datetime.fromisoformat(date_str)
         bbox_vals = parse_bbox(bbox)
-        _, limit, _ = traffic_detail_for_zoom(zoom, limit)
+        highway_types, limit, _ = traffic_detail_for_zoom(zoom, limit)
         cache_key = (
             "summary",
             city.lower() if city else None,
@@ -434,6 +441,12 @@ async def get_traffic_summary(
 
         observation_where, filter_params = build_observation_filters(city=city, bbox_vals=bbox_vals)
         params = {"target_time": target_time, "limit": limit, **filter_params}
+        if highway_types:
+            params["highway_types"] = list(highway_types)
+        highway_where = (
+            "AND COALESCE(rs.highway_type, 'traffic') = ANY(CAST(:highway_types AS text[]))"
+            if highway_types else ""
+        )
 
         query = text(
             f"""
@@ -456,6 +469,7 @@ async def get_traffic_summary(
                 WHERE o.observed_at BETWEEN :target_time - INTERVAL '7 days' AND :target_time + INTERVAL '7 days'
                   AND o.geometry IS NOT NULL
                   {observation_where}
+                  {highway_where}
                 ORDER BY COALESCE(o.road_segment_id, o.id), abs(extract(epoch from o.observed_at - :target_time))
             ),
             visible_segments AS (
@@ -591,7 +605,7 @@ async def get_traffic_tile(
                 headers=headers,
             )
 
-        _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)[1:]
+        _, _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)
         cache_key = (
             "tile",
             city.lower() if city else None,
@@ -714,10 +728,10 @@ async def get_segment_tile(
     """
     Geometry-only vector tiles for the permanent road skeleton (no traffic data).
     Cached for 1 hour on both server and browser — road geometry rarely changes.
-    All road types are returned at every zoom level.
+    Road classes progressively unlock by zoom so low-zoom tiles remain readable.
     """
     try:
-        _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)[1:]
+        highway_types, _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)
 
         cache_key = (
             "seg_tile",
@@ -751,6 +765,10 @@ async def get_segment_tile(
             "simplify_tolerance": simplify_tolerance,
             **filter_params,
         }
+        highway_where = ""
+        if highway_types:
+            params["highway_types"] = list(highway_types)
+            highway_where = "AND src.highway_type = ANY(CAST(:highway_types AS text[]))"
 
         source_rows_sql = """
                 SELECT
@@ -812,6 +830,7 @@ async def get_segment_tile(
                 ) src, bounds
                 {city_where}
                   AND src.geometry && bounds.bounds_4326
+                  {highway_where}
             )
             SELECT ST_AsMVT(tile_rows, 'segments', 4096, 'geom')
             FROM tile_rows

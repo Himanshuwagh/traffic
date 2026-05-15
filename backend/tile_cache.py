@@ -14,6 +14,20 @@ log = logging.getLogger(__name__)
 
 MVT_LAYER_NAME = "traffic"
 
+HW_MOTORWAY = ("motorway", "motorway_link")
+HW_TRUNK = HW_MOTORWAY + ("trunk", "trunk_link")
+HW_PRIMARY = HW_TRUNK + ("primary", "primary_link")
+HW_SECONDARY = HW_PRIMARY + ("secondary", "secondary_link")
+HW_TERTIARY = HW_SECONDARY + ("tertiary", "tertiary_link")
+HW_MINOR = HW_TERTIARY + (
+    "unclassified",
+    "residential",
+    "living_street",
+    "service",
+    "traffic",
+    "unknown",
+)
+
 
 @dataclass(frozen=True)
 class CachedTile:
@@ -43,12 +57,12 @@ def floor_to_hour(value: datetime) -> datetime:
 
 def traffic_detail_for_zoom(zoom: float | None, requested_limit: int) -> tuple[tuple[str, ...] | None, int, float]:
     if zoom is None or zoom < 9:
-        return None, min(requested_limit, 50000), 0.0006
+        return HW_PRIMARY, min(requested_limit, 50000), 0.0006
     if zoom < 12:
-        return None, min(requested_limit, 50000), 0.0002
+        return HW_SECONDARY, min(requested_limit, 50000), 0.0002
     if zoom < 14:
-        return None, min(requested_limit, 50000), 0.00005
-    return None, min(requested_limit, 50000), 0.0
+        return HW_TERTIARY, min(requested_limit, 50000), 0.00005
+    return HW_MINOR, min(requested_limit, 50000), 0.0
 
 
 def lookup_cached_traffic_tile(db, *, city: str | None, target_time: datetime, z: int, x: int, y: int) -> CachedTile | None:
@@ -74,9 +88,15 @@ def lookup_cached_traffic_tile(db, *, city: str | None, target_time: datetime, z
 
 
 def build_live_traffic_tile(db, *, city: str | None, target_time: datetime, z: int, x: int, y: int) -> bytes:
-    _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)[1:]
+    highway_types, _, simplify_tolerance = traffic_detail_for_zoom(float(z), 50000)
     city_filter = "AND LOWER(o.city) = LOWER(:city)" if city else ""
+    highway_filter = (
+        "AND COALESCE(rs.highway_type, 'traffic') = ANY(CAST(:highway_types AS text[]))"
+        if highway_types else ""
+    )
     filter_params: dict = {"city": city} if city else {}
+    if highway_types:
+        filter_params["highway_types"] = list(highway_types)
     params = {
         "target_time": target_time,
         "z": z,
@@ -114,6 +134,7 @@ def build_live_traffic_tile(db, *, city: str | None, target_time: datetime, z: i
                                     AND :target_time + INTERVAL '3 hours'
               AND o.geometry && bounds.bounds_4326
               {city_filter}
+              {highway_filter}
         ),
         closest_traffic AS (
             SELECT DISTINCT ON (COALESCE(road_segment_id, id))

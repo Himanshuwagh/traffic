@@ -38,10 +38,31 @@ const formatDateInputValue = (date: Date) => {
   return `${year}-${month}-${day}`;
 };
 
+type MapViewport = {
+  center: [number, number];
+  zoom: number;
+};
+
+const parseFiniteNumber = (value: string | null) => {
+  if (value === null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
 const Explore: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const defaultCityId = cities[0]?.id || "pune";
-  const cityParam = searchParams.get("city") || defaultCityId;
+  const cityParam = searchParams.get("city");
+  const lngParam = parseFiniteNumber(searchParams.get("lng"));
+  const latParam = parseFiniteNumber(searchParams.get("lat"));
+  const zoomParam = parseFiniteNumber(searchParams.get("zoom"));
+  const initialViewport =
+    lngParam !== null && latParam !== null
+      ? {
+          center: [lngParam, latParam] as [number, number],
+          zoom: zoomParam ?? 11,
+        }
+      : null;
   const dateParam =
     searchParams.get("date") || new Date().toISOString().split("T")[0];
   const timeParam = Number(searchParams.get("hour"));
@@ -49,11 +70,19 @@ const Explore: React.FC = () => {
     Number.isInteger(timeParam) && timeParam >= 0 && timeParam <= 23
       ? timeParam
       : 8;
-  const normalizedInitialCityId = cities.some((c) => c.id === cityParam)
-    ? cityParam
-    : defaultCityId;
+  const normalizedInitialCityId =
+    cityParam && cities.some((c) => c.id === cityParam)
+      ? cityParam
+      : initialViewport
+        ? null
+        : defaultCityId;
 
-  const [selectedCityId, setSelectedCityId] = useState(normalizedInitialCityId);
+  const [selectedCityId, setSelectedCityId] = useState<string | null>(
+    normalizedInitialCityId,
+  );
+  const [mapViewport, setMapViewport] = useState<MapViewport | null>(
+    initialViewport,
+  );
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(
     null,
   );
@@ -70,31 +99,51 @@ const Explore: React.FC = () => {
     null,
   );
 
-  // Clear selected segment when city changes
-  React.useEffect(() => {
-    setSelectedSegmentId(null);
-  }, [selectedCityId]);
-
   const handleCityChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newCity = e.target.value;
     setSelectedCityId(newCity);
+    setMapViewport(null);
     setSelectedSegmentId(null);
   };
 
+  const handleViewportCityChange = React.useCallback(
+    (cityId: string | null, viewport: MapViewport) => {
+      setMapViewport(viewport);
+      setSelectedCityId(cityId);
+      if (cityId !== selectedCityId) {
+        setSelectedSegmentId(null);
+      }
+    },
+    [selectedCityId],
+  );
+
   React.useEffect(() => {
-    setSearchParams(
-      {
-        city: selectedCityId,
-        date: selectedDate,
-        hour: String(timeHour),
-      },
-      { replace: true },
-    );
-  }, [selectedCityId, selectedDate, timeHour, setSearchParams]);
+    const nextParams: Record<string, string> = {
+      date: selectedDate,
+      hour: String(timeHour),
+    };
+    if (selectedCityId) {
+      nextParams.city = selectedCityId;
+    } else if (mapViewport) {
+      nextParams.lng = mapViewport.center[0].toFixed(4);
+      nextParams.lat = mapViewport.center[1].toFixed(4);
+      nextParams.zoom = mapViewport.zoom.toFixed(2);
+    }
+    setSearchParams(nextParams, { replace: true });
+  }, [mapViewport, selectedCityId, selectedDate, timeHour, setSearchParams]);
 
   const city = useMemo(
-    () => cities.find((c) => c.id === selectedCityId) || cities[0],
-    [selectedCityId],
+    () =>
+      selectedCityId
+        ? cities.find((c) => c.id === selectedCityId) || cities[0]
+        : {
+            ...cities[0],
+            id: "map-view",
+            name: "Current Map View",
+            center: mapViewport?.center || cities[0].center,
+            zoom: mapViewport?.zoom || cities[0].zoom,
+          },
+    [mapViewport, selectedCityId],
   );
   const selectedSegment = useMemo(
     () => segments.find((s) => s.id === selectedSegmentId),
@@ -131,6 +180,10 @@ const Explore: React.FC = () => {
         const [year, month, day] = selectedDate.split("-").map(Number);
         const targetTime = new Date(year, month - 1, day, timeHour, 0, 0);
         const dateStr = targetTime.toISOString().split(".")[0];
+        if (!selectedCityId) {
+          setWeather(null);
+          return;
+        }
 
         const res = await fetch(
           apiUrl(`/api/weather/${dateStr}?city=${selectedCityId}`),
@@ -141,7 +194,7 @@ const Explore: React.FC = () => {
         } else {
           setWeather(null);
         }
-      } catch (e) {
+      } catch {
         setWeather(null);
       }
     };
@@ -180,10 +233,15 @@ const Explore: React.FC = () => {
                     City
                   </span>
                   <select
-                    value={selectedCityId}
+                    value={selectedCityId ?? "map-view"}
                     onChange={handleCityChange}
                     className="block w-full rounded-xl border border-[#e8e0cf] bg-[#fcfaf4] px-3 py-2.5 text-sm font-medium text-gray-800 outline-none transition focus:border-brand-amber"
                   >
+                    {!selectedCityId && (
+                      <option value="map-view" disabled>
+                        Current Map View
+                      </option>
+                    )}
                     {cities.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
@@ -292,9 +350,9 @@ const Explore: React.FC = () => {
         <div className="flex-1 w-full h-full min-h-0 relative">
           <MapboxMap
             city={city}
-            cityId={city.id}
+            cityId={selectedCityId}
             knownCities={cities}
-            onViewportCityChange={setSelectedCityId}
+            onViewportCityChange={handleViewportCityChange}
             selectedSegmentId={selectedSegmentId}
             onSegmentClick={setSelectedSegmentId}
             timeHour={timeHour}

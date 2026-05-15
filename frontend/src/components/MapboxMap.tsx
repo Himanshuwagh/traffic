@@ -17,13 +17,10 @@
  *  Total layers: 3  (down from 18 in the previous iteration).
  *  Total tile requests per viewport: 2× (down from 18× with per-class layers).
  *
- *  Progressive zoom reveal is driven by the TILE SERVER, not by layer minzoom:
- *   z 7-9   → motorway / motorway_link only
- *   z 9-11  → + trunk
- *   z 11-12.5 → + primary
- *   z 12.5-14 → + secondary
- *   z 14-15 → + tertiary
- *   z 15+   → + residential / service / unclassified
+ *  Progressive zoom reveal is driven by layer paint expressions first, so
+ *  cached tiles can safely contain full geometry without flooding low-zoom
+ *  views. The backend applies the same road hierarchy to keep new live tiles
+ *  smaller, but visual consistency does not depend on cache contents.
  *
  *  Source maxzoom: 14 → Mapbox overzooms z=14 tiles for z>14 camera positions.
  *  This eliminates tile requests at z 15-22 (no DB queries for those zooms).
@@ -55,9 +52,12 @@ const TILE_SERVER_URL = (
 
 interface MapboxMapProps {
   city: City;
-  cityId: string;
+  cityId: string | null;
   knownCities: City[];
-  onViewportCityChange?: (cityId: string) => void;
+  onViewportCityChange?: (
+    cityId: string | null,
+    viewport: { center: [number, number]; zoom: number },
+  ) => void;
   selectedSegmentId: string | null;
   onSegmentClick: (id: string) => void;
   timeHour: number;
@@ -98,6 +98,24 @@ const TRAFFIC_CLICK_ID = "traffic-click";
 
 const SIGNALS_SOURCE_ID = "signals";
 const SIGNALS_LAYER_ID = "signals-layer";
+
+const MAJOR_ROADS = [
+  "motorway",
+  "motorway_link",
+  "trunk",
+  "trunk_link",
+  "primary",
+  "primary_link",
+];
+const COLLECTOR_ROADS = ["secondary", "secondary_link", "tertiary", "tertiary_link"];
+const LOCAL_ROADS = [
+  "unclassified",
+  "residential",
+  "living_street",
+  "service",
+  "traffic",
+  "unknown",
+];
 
 // ─── Source settings ──────────────────────────────────────────────────────────
 // maxzoom:14 → Mapbox overzooms z=14 tiles for camera z>14.
@@ -198,6 +216,39 @@ const LINE_WIDTH: mapboxgl.Expression = [
   ],
 ];
 
+const ROAD_REVEAL_OPACITY: mapboxgl.Expression = [
+  "match",
+  ["get", "highway_type"],
+  ["motorway", "motorway_link"],
+  ["interpolate", ["linear"], ["zoom"], 4, 0.95, 6, 0.95],
+  ["trunk", "trunk_link"],
+  ["interpolate", ["linear"], ["zoom"], 5.8, 0.0, 7.0, 0.9],
+  ["primary", "primary_link"],
+  ["interpolate", ["linear"], ["zoom"], 7.2, 0.0, 8.6, 0.85],
+  ["secondary", "secondary_link"],
+  ["interpolate", ["linear"], ["zoom"], 9.3, 0.0, 10.8, 0.78],
+  ["tertiary", "tertiary_link"],
+  ["interpolate", ["linear"], ["zoom"], 10.8, 0.0, 12.3, 0.7],
+  ["unclassified", "residential", "living_street", "service"],
+  ["interpolate", ["linear"], ["zoom"], 12.3, 0.0, 14.2, 0.62],
+  ["interpolate", ["linear"], ["zoom"], 12.8, 0.0, 14.5, 0.55],
+];
+
+const VISIBLE_ROAD_FILTER: mapboxgl.FilterSpecification = [
+  "any",
+  ["in", ["get", "highway_type"], ["literal", MAJOR_ROADS]],
+  [
+    "all",
+    [">=", ["zoom"], 9.3],
+    ["in", ["get", "highway_type"], ["literal", COLLECTOR_ROADS]],
+  ],
+  [
+    "all",
+    [">=", ["zoom"], 12.3],
+    ["in", ["get", "highway_type"], ["literal", LOCAL_ROADS]],
+  ],
+];
+
 /**
  * Same as LINE_WIDTH but the selected segment is 2.5× wider at high zoom.
  */
@@ -275,8 +326,13 @@ const buildWidthWithSelection = (
 
 const buildOpacity = (selectedId: string | null): mapboxgl.Expression =>
   selectedId
-    ? ["case", ["==", ["to-string", ["get", "id"]], selectedId], 1.0, 0.85]
-    : (0.85 as unknown as mapboxgl.Expression);
+    ? [
+        "case",
+        ["==", ["to-string", ["get", "id"]], selectedId],
+        1.0,
+        ROAD_REVEAL_OPACITY,
+      ]
+    : ROAD_REVEAL_OPACITY;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -285,6 +341,8 @@ const buildDateTimeKey = (date: string, hour: number): string => {
   return new Date(y, m - 1, d, hour, 0, 0).toISOString().split(".")[0];
 };
 
+const cityQuery = (cityId: string | null) =>
+  cityId ? `?city=${encodeURIComponent(cityId)}` : "";
 const roundCoord = (v: number) => Number(v.toFixed(4));
 const PREWARM_TILE_RADIUS = 1;
 const PREWARM_ALL_CITY_RADIUS = 0;
@@ -345,7 +403,7 @@ const lngLatToTile = (lng: number, lat: number, zoom: number) => {
 const buildBoundsTileUrls = (
   bounds: mapboxgl.LngLatBounds,
   zoom: number,
-  cityId: string,
+  cityId: string | null,
   dateStr: string,
 ) => {
   const west = bounds.getWest();
@@ -366,13 +424,13 @@ const buildBoundsTileUrls = (
     for (let y = minY; y <= maxY; y += 1) {
       urls.push(
         apiUrl(
-          `/api/traffic/tiles/${dateStr}/${zoom}/${x}/${y}.mvt?city=${encodeURIComponent(cityId)}`,
+          `/api/traffic/tiles/${dateStr}/${zoom}/${x}/${y}.mvt${cityQuery(cityId)}`,
         ),
       );
       if (!TILE_SERVER_URL) {
         urls.push(
           apiUrl(
-            `/api/segments/tiles/${zoom}/${x}/${y}.mvt?city=${encodeURIComponent(cityId)}`,
+            `/api/segments/tiles/${zoom}/${x}/${y}.mvt${cityQuery(cityId)}`,
           ),
         );
       }
@@ -559,6 +617,10 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
     const updateViewportCity = () => {
       const center = map.current?.getCenter();
       if (!center) return;
+      const viewport = {
+        center: [roundCoord(center.lng), roundCoord(center.lat)] as [number, number],
+        zoom: Number(map.current!.getZoom().toFixed(2)),
+      };
 
       const nearest = knownCities
         .map((candidate) => ({
@@ -575,7 +637,12 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
         nearest.id !== cityId &&
         nearest.distance <= CITY_SWITCH_DISTANCE_KM
       ) {
-        onViewportCityChange(nearest.id);
+        onViewportCityChange(nearest.id, viewport);
+        return;
+      }
+
+      if (!nearest || nearest.distance > CITY_SWITCH_DISTANCE_KM) {
+        onViewportCityChange(null, viewport);
       }
     };
 
@@ -694,12 +761,10 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
   }, [cityId, mapLoaded, selectedDate, timeHour]);
 
   useEffect(() => {
-    if (!TILE_SERVER_URL) {
-      setBaseTileMode("backend");
-      return;
-    }
+    if (!TILE_SERVER_URL) return;
 
-    const cachedMode = baseTileModeCache.current.get(cityId);
+    const baseModeKey = cityId ?? "__map_view__";
+    const cachedMode = baseTileModeCache.current.get(baseModeKey);
     if (cachedMode) {
       setBaseTileMode(cachedMode);
       return;
@@ -722,12 +787,12 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
         }
         const tileBytes = await response.arrayBuffer();
         const mode: BaseTileMode = tileBytes.byteLength > 0 ? "worker" : "backend";
-        baseTileModeCache.current.set(cityId, mode);
+        baseTileModeCache.current.set(baseModeKey, mode);
         setBaseTileMode(mode);
       })
       .catch(() => {
         if (controller.signal.aborted) return;
-        baseTileModeCache.current.set(cityId, "backend");
+        baseTileModeCache.current.set(baseModeKey, "backend");
         setBaseTileMode("backend");
       });
 
@@ -767,7 +832,7 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
     } else {
       // ── Fallback: live MVT tiles from Render API (original behaviour) ───────
       const fallbackUrl = apiUrl(
-        `/api/segments/tiles/{z}/{x}/{y}.mvt?city=${encodeURIComponent(cityId)}`,
+        `/api/segments/tiles/{z}/{x}/{y}.mvt${cityQuery(cityId)}`,
       );
       if (existingSrc) {
         // City changed — swap the tile URL; source + layer already exist
@@ -795,10 +860,10 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
       paint: {
         "line-color": "#8a8a9a",
         "line-width": LINE_WIDTH,
-        "line-opacity": 0.9,
+        "line-opacity": ROAD_REVEAL_OPACITY,
       },
     });
-  }, [baseTileMode, cityId, mapLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [baseTileMode, cityId, mapLoaded]);
 
   // ── 4. TRAFFIC layer — coloured overlay, updated on time/date/city change ───
   // setTiles() is called on every change; Mapbox keeps the old tiles painted
@@ -808,7 +873,7 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
 
     const dateStr = buildDateTimeKey(selectedDate, timeHour);
     const tileUrl = apiUrl(
-      `/api/traffic/tiles/${dateStr}/{z}/{x}/{y}.mvt?city=${encodeURIComponent(cityId)}`,
+      `/api/traffic/tiles/${dateStr}/{z}/{x}/{y}.mvt${cityQuery(cityId)}`,
     );
 
     const isNew = upsertSource(map.current, TRAFFIC_SOURCE_ID, tileUrl);
@@ -822,6 +887,7 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
         source: TRAFFIC_SOURCE_ID,
         "source-layer": TRAFFIC_SOURCE_LAYER,
         minzoom: 0,
+        filter: VISIBLE_ROAD_FILTER,
         layout: { "line-cap": "round", "line-join": "round" },
         paint: {
           "line-color": "transparent",
@@ -884,9 +950,12 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
         if (key === lastSummaryKey.current) return;
         lastSummaryKey.current = key;
 
-        const url = apiUrl(
-          `/api/traffic/summary/${dateStr}?city=${encodeURIComponent(cityId)}&bbox=${encodeURIComponent(bbox)}&zoom=${zoom}`,
-        );
+        const query = new URLSearchParams({
+          bbox,
+          zoom: String(zoom),
+        });
+        if (cityId) query.set("city", cityId);
+        const url = apiUrl(`/api/traffic/summary/${dateStr}?${query.toString()}`);
         const res = await fetch(url, { signal: ctrl.signal });
         const summary = await res.json();
         onSummaryLoaded?.(summary.error ? null : summary);
@@ -913,6 +982,13 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
   // ── 7. Signals ───────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!map.current || !mapLoaded) return;
+    if (!cityId) {
+      const src = map.current.getSource(
+        SIGNALS_SOURCE_ID,
+      ) as mapboxgl.GeoJSONSource;
+      if (src) src.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
     fetch(apiUrl(`/api/signals?city=${encodeURIComponent(cityId)}`))
       .then((r) => r.json())
       .then((d) => {
