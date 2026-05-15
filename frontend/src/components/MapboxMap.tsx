@@ -420,6 +420,8 @@ type VecSource = mapboxgl.VectorTileSource & {
   setTiles?: (t: string[]) => void;
 };
 
+type BaseTileMode = "worker" | "backend";
+
 /** Upsert a vector tile source. Returns true if the source was newly created. */
 const upsertSource = (
   m: mapboxgl.Map,
@@ -460,9 +462,13 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
+  const [baseTileMode, setBaseTileMode] = useState<BaseTileMode>(
+    TILE_SERVER_URL ? "worker" : "backend",
+  );
   const lastSummaryKey = useRef<string>("");
   const prewarmedUrls = useRef<Set<string>>(new Set());
   const prefetchedSummaries = useRef<Map<string, TrafficSummary>>(new Map());
+  const baseTileModeCache = useRef<Map<string, BaseTileMode>>(new Map());
 
   // ── 1. Init map once ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -687,6 +693,47 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
     };
   }, [cityId, mapLoaded, selectedDate, timeHour]);
 
+  useEffect(() => {
+    if (!TILE_SERVER_URL) {
+      setBaseTileMode("backend");
+      return;
+    }
+
+    const cachedMode = baseTileModeCache.current.get(cityId);
+    if (cachedMode) {
+      setBaseTileMode(cachedMode);
+      return;
+    }
+
+    const controller = new AbortController();
+    const zoom = Math.max(8, Math.min(14, Math.round(city.zoom)));
+    const centerTile = lngLatToTile(city.center[0], city.center[1], zoom);
+    const probeUrl =
+      `${TILE_SERVER_URL}/tiles/${zoom}/${centerTile.x}/${centerTile.y}.mvt`;
+
+    fetch(probeUrl, {
+      signal: controller.signal,
+      credentials: "omit",
+      cache: "no-store",
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`base tile probe failed: ${response.status}`);
+        }
+        const tileBytes = await response.arrayBuffer();
+        const mode: BaseTileMode = tileBytes.byteLength > 0 ? "worker" : "backend";
+        baseTileModeCache.current.set(cityId, mode);
+        setBaseTileMode(mode);
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        baseTileModeCache.current.set(cityId, "backend");
+        setBaseTileMode("backend");
+      });
+
+    return () => controller.abort();
+  }, [city, cityId]);
+
   // ── 3. BASE layer — road skeleton from Worker tile server or API fallback ───
   //
   // Worker path  (VITE_TILE_SERVER_URL is set):
@@ -704,19 +751,19 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
       | VecSource
       | undefined;
 
-    if (TILE_SERVER_URL) {
+    if (TILE_SERVER_URL && baseTileMode === "worker") {
       // ── Cloudflare Worker tile server: wire up once, covers all India ──────
-      // Source already exists → nothing to do on city change
-      if (existingSrc) return;
-
-      map.current.addSource(BASE_SOURCE_ID, {
-        type: "vector",
-        // Worker serves standard {z}/{x}/{y}.mvt URLs — Mapbox GL JS handles
-        // these natively. No custom protocol or library changes needed.
-        tiles: [`${TILE_SERVER_URL}/tiles/{z}/{x}/{y}.mvt`],
-        minzoom: SOURCE_MINZOOM,
-        maxzoom: SOURCE_MAXZOOM,
-      });
+      const workerUrl = `${TILE_SERVER_URL}/tiles/{z}/{x}/{y}.mvt`;
+      if (existingSrc) {
+        if (typeof existingSrc.setTiles === "function") existingSrc.setTiles([workerUrl]);
+      } else {
+        map.current.addSource(BASE_SOURCE_ID, {
+          type: "vector",
+          tiles: [workerUrl],
+          minzoom: SOURCE_MINZOOM,
+          maxzoom: SOURCE_MAXZOOM,
+        });
+      }
     } else {
       // ── Fallback: live MVT tiles from Render API (original behaviour) ───────
       const fallbackUrl = apiUrl(
@@ -751,7 +798,7 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
         "line-opacity": 0.9,
       },
     });
-  }, [cityId, mapLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [baseTileMode, cityId, mapLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 4. TRAFFIC layer — coloured overlay, updated on time/date/city change ───
   // setTiles() is called on every change; Mapbox keeps the old tiles painted

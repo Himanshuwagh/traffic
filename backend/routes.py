@@ -181,16 +181,23 @@ async def trigger_traffic_fetch(
     limit: int = Query(default=100, ge=1, le=500),
 ):
     """
-    Trigger a real-time TomTom traffic data fetch and store results in traffic_data.
+    Trigger a manual TomTom traffic observation ingest run.
     Runs synchronously — response contains fetch stats.
     """
     try:
         try:
-            from .fetch_tomtom import fetch_traffic_tomtom
+            from .ingest_tomtom_traffic import run_ingestion
         except ImportError:
-            from fetch_tomtom import fetch_traffic_tomtom
-        result = fetch_traffic_tomtom(city=city, limit=limit)
-        return result
+            from ingest_tomtom_traffic import run_ingestion
+        result = run_ingestion(cities=[city] if city else None, mode="discovery", max_tiles_per_city=limit)
+        return {
+            "fetched": result["observations_saved"],
+            "failed": 0,
+            "skipped": result["observations_skipped"],
+            "snapshot_time": datetime.utcnow().isoformat(),
+            "city": city or "all",
+            "scope_limit": limit,
+        }
     except Exception as e:
         return {"error": str(e), "fetched": 0, "failed": 0}
 
@@ -201,28 +208,27 @@ async def get_hourly_speed_profile(
     db: Session = Depends(get_db),
 ):
     """
-    Return average speed bucketed by hour-of-day across all stored traffic_data.
+    Return average speed bucketed by hour-of-day across stored traffic observations.
     Used for the CityOverview hourly bar chart.
     """
     try:
         params: dict = {}
         city_clause = ""
         if city:
-            city_clause = "AND LOWER(rs.city) = LOWER(:city)"
+            city_clause = "AND LOWER(o.city) = LOWER(:city)"
             params["city"] = city
 
         rows = db.execute(
             text(f"""
                 SELECT
-                    EXTRACT(HOUR FROM td.date)::int AS hour_of_day,
-                    ROUND(AVG(td.speed)::numeric, 1) AS avg_speed,
+                    o.hour_of_day,
+                    ROUND(AVG(o.speed_kmph)::numeric, 1) AS avg_speed,
                     COUNT(*) AS count
-                FROM traffic_data td
-                JOIN road_segments rs ON rs.id = td.segment_id
-                WHERE td.speed IS NOT NULL
+                FROM traffic_observations o
+                WHERE o.speed_kmph IS NOT NULL
                 {city_clause}
-                GROUP BY hour_of_day
-                ORDER BY hour_of_day
+                GROUP BY o.hour_of_day
+                ORDER BY o.hour_of_day
             """),
             params,
         ).fetchall()
@@ -246,24 +252,23 @@ async def get_latest_traffic_stats(
     city: str | None = None,
     db: Session = Depends(get_db),
 ):
-    """Return stats about the most recent traffic data in the DB."""
+    """Return stats about the most recent traffic observations in the DB."""
     try:
         params: dict = {}
         city_clause = ""
         if city:
-            city_clause = "AND LOWER(rs.city) = LOWER(:city)"
+            city_clause = "AND LOWER(o.city) = LOWER(:city)"
             params["city"] = city
 
         result = db.execute(
             text(f"""
                 SELECT
                     COUNT(*) AS total_records,
-                    MAX(td.date) AS latest_snapshot,
-                    MIN(td.date) AS earliest_snapshot,
-                    COUNT(DISTINCT td.segment_id) AS unique_segments,
-                    ROUND(AVG(td.speed)::numeric, 1) AS avg_speed
-                FROM traffic_data td
-                JOIN road_segments rs ON rs.id = td.segment_id
+                    MAX(o.observed_at_hour) AS latest_snapshot,
+                    MIN(o.observed_at_hour) AS earliest_snapshot,
+                    COUNT(DISTINCT COALESCE(o.road_segment_id, o.id)) AS unique_segments,
+                    ROUND(AVG(o.speed_kmph)::numeric, 1) AS avg_speed
+                FROM traffic_observations o
                 WHERE 1=1 {city_clause}
             """),
             params,

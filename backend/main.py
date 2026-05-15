@@ -5,12 +5,12 @@ from sqlalchemy import text
 import os
 try:
     # When launched as a package: `python -m uvicorn backend.main:app`
-    from .database import get_db, engine, ensure_performance_indexes
+    from .database import bootstrap_database, get_db, engine
     from .models import Base
     from .routes import router
 except ImportError:
     # When launched from within `backend/`: `python -m uvicorn main:app`
-    from database import get_db, engine, ensure_performance_indexes
+    from database import bootstrap_database, get_db, engine
     from models import Base
     from routes import router
 
@@ -25,11 +25,9 @@ except Exception as exc:
     )
 
 try:
-    ensure_performance_indexes()
+    bootstrap_database()
 except Exception as exc:
-    _logger.warning(
-        "Startup index creation skipped after error: %s", exc
-    )
+    _logger.warning("Startup schema/index bootstrap skipped after error: %s", exc)
 
 app = FastAPI(title="Traffic Intelligence API", version="1.0.0")
 

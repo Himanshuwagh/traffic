@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import os
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -17,7 +19,7 @@ except ImportError:  # pragma: no cover - handled at runtime for deploy clarity
     decode_mvt = None
 
 try:
-    from .database import SessionLocal, engine, ensure_performance_indexes
+    from .database import SessionLocal, bootstrap_database, engine
     from .models import Base
     from .tile_cache import pregenerate_traffic_tiles_for_observations
     from .tomtom_client import (
@@ -29,7 +31,7 @@ try:
         tiles_for_bbox,
     )
 except ImportError:
-    from database import SessionLocal, engine, ensure_performance_indexes  # type: ignore[no-redef]
+    from database import SessionLocal, bootstrap_database, engine  # type: ignore[no-redef]
     from models import Base  # type: ignore[no-redef]
     from tile_cache import pregenerate_traffic_tiles_for_observations  # type: ignore[no-redef]
     from tomtom_client import (  # type: ignore[no-redef]
@@ -46,15 +48,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 log = logging.getLogger(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))
-
-SUPPORTED_CITIES: dict[str, dict[str, Any]] = {
-    "bengaluru": {"center": (77.63, 12.95), "bbox": (77.45, 12.80, 77.82, 13.12)},
-    "pune": {"center": (73.8567, 18.5204), "bbox": (73.68, 18.40, 74.02, 18.68)},
-    "mumbai": {"center": (72.8777, 19.0760), "bbox": (72.75, 18.88, 73.08, 19.30)},
-    "delhi": {"center": (77.1025, 28.7041), "bbox": (76.84, 28.42, 77.35, 28.90)},
-    "hyderabad": {"center": (78.4867, 17.3850), "bbox": (78.25, 17.20, 78.65, 17.55)},
-    "chennai": {"center": (80.2707, 13.0827), "bbox": (80.10, 12.88, 80.35, 13.25)},
-}
 
 JAM_LEVELS = (
     ("severe", 0.75),
@@ -80,6 +73,35 @@ class ObservationCandidate:
     congestion_index: float | None
     jam_level: str
     road_closure: bool | None
+
+
+@dataclass(frozen=True)
+class CityScope:
+    city: str
+    center: tuple[float, float]
+    bbox: tuple[float, float, float, float]
+
+
+class DailyTileBudget:
+    def __init__(self, *, used: int, limit: int) -> None:
+        self._used = used
+        self._limit = limit
+        self._lock = threading.Lock()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def try_consume(self, count: int = 1) -> bool:
+        with self._lock:
+            if self._used + count > self._limit:
+                return False
+            self._used += count
+            return True
+
+    def snapshot_used(self) -> int:
+        with self._lock:
+            return self._used
 
 
 def _float_prop(props: dict[str, Any], *names: str) -> float | None:
@@ -291,6 +313,37 @@ def _quota_used_today(db) -> tuple[int, int]:
     return int(row.tile_requests or 0), int(row.non_tile_requests or 0)
 
 
+def load_city_scopes(db) -> dict[str, CityScope]:
+    rows = db.execute(
+        text("""
+            SELECT
+                LOWER(TRIM(city)) AS city,
+                ST_XMin(ST_Extent(geometry)) - 0.01 AS min_lon,
+                ST_YMin(ST_Extent(geometry)) - 0.01 AS min_lat,
+                ST_XMax(ST_Extent(geometry)) + 0.01 AS max_lon,
+                ST_YMax(ST_Extent(geometry)) + 0.01 AS max_lat
+            FROM road_segments
+            WHERE city IS NOT NULL
+              AND TRIM(city) <> ''
+              AND geometry IS NOT NULL
+            GROUP BY LOWER(TRIM(city))
+            HAVING ST_Extent(geometry) IS NOT NULL
+            ORDER BY LOWER(TRIM(city))
+        """)
+    ).fetchall()
+
+    scopes: dict[str, CityScope] = {}
+    for row in rows:
+        bbox = (float(row.min_lon), float(row.min_lat), float(row.max_lon), float(row.max_lat))
+        center = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+        scopes[row.city] = CityScope(city=row.city, center=center, bbox=bbox)
+    return scopes
+
+
+def _normalize_city_name(city: str) -> str:
+    return city.strip().lower()
+
+
 def _active_hotspot_bboxes(db, city: str) -> list[tuple[float, float, float, float]]:
     interval_hours = int(os.getenv("TOMTOM_TRACKING_INTERVAL_HOURS", "3"))
     rows = db.execute(
@@ -312,7 +365,29 @@ def _active_hotspot_bboxes(db, city: str) -> list[tuple[float, float, float, flo
     return [(row.min_lon, row.min_lat, row.max_lon, row.max_lat) for row in rows]
 
 
+def _derived_observation_fields(
+    observed_at: datetime,
+    speed_kmph: float | None,
+    free_flow_speed_kmph: float | None,
+) -> tuple[datetime, float | None, int, int]:
+    observed_at_hour = observed_at.replace(minute=0, second=0, microsecond=0)
+    speed_ratio = None
+    if speed_kmph is not None and free_flow_speed_kmph and free_flow_speed_kmph > 0:
+        speed_ratio = max(0.0, min(1.0, speed_kmph / free_flow_speed_kmph))
+    return (
+        observed_at_hour,
+        speed_ratio,
+        observed_at.hour,
+        observed_at.weekday(),
+    )
+
+
 def _insert_candidate(db, candidate: ObservationCandidate, raw_ttl_expires_at: datetime) -> int | None:
+    observed_at_hour, speed_ratio, hour_of_day, day_of_week = _derived_observation_fields(
+        candidate.observed_at,
+        candidate.speed_kmph,
+        candidate.free_flow_speed_kmph,
+    )
     row = db.execute(
         text("""
             WITH incoming AS (
@@ -329,15 +404,17 @@ def _insert_candidate(db, candidate: ObservationCandidate, raw_ttl_expires_at: d
             ),
             inserted AS (
                 INSERT INTO traffic_observations (
-                    observed_at, source, source_kind, source_ref, road_segment_id,
+                    observed_at, observed_at_hour, source, source_kind, source_ref, road_segment_id,
                     geometry, city, speed_kmph, free_flow_speed_kmph,
-                    travel_time_seconds, free_flow_travel_time_seconds, confidence,
+                    speed_ratio, travel_time_seconds, free_flow_travel_time_seconds, confidence,
+                    hour_of_day, day_of_week,
                     congestion_index, jam_level, road_closure, raw_payload, raw_ttl_expires_at
                 )
                 SELECT
-                    :observed_at, 'tomtom', :source_kind, :source_ref, matched.id,
+                    :observed_at, :observed_at_hour, 'tomtom', :source_kind, :source_ref, matched.id,
                     incoming.geom, :city, :speed_kmph, :free_flow_speed_kmph,
-                    :travel_time_seconds, :free_flow_travel_time_seconds, :confidence,
+                    :speed_ratio, :travel_time_seconds, :free_flow_travel_time_seconds, :confidence,
+                    :hour_of_day, :day_of_week,
                     :congestion_index, :jam_level, :road_closure, :raw_payload, :raw_ttl_expires_at
                 FROM incoming
                 LEFT JOIN matched ON true
@@ -347,21 +424,46 @@ def _insert_candidate(db, candidate: ObservationCandidate, raw_ttl_expires_at: d
                     WHERE existing.source = 'tomtom'
                       AND existing.source_ref = :source_ref
                 )
+                ON CONFLICT (road_segment_id, observed_at_hour)
+                WHERE road_segment_id IS NOT NULL AND source = 'tomtom'
+                DO UPDATE SET
+                    observed_at = EXCLUDED.observed_at,
+                    source_kind = EXCLUDED.source_kind,
+                    source_ref = EXCLUDED.source_ref,
+                    geometry = EXCLUDED.geometry,
+                    city = EXCLUDED.city,
+                    speed_kmph = EXCLUDED.speed_kmph,
+                    free_flow_speed_kmph = EXCLUDED.free_flow_speed_kmph,
+                    speed_ratio = EXCLUDED.speed_ratio,
+                    travel_time_seconds = EXCLUDED.travel_time_seconds,
+                    free_flow_travel_time_seconds = EXCLUDED.free_flow_travel_time_seconds,
+                    confidence = EXCLUDED.confidence,
+                    hour_of_day = EXCLUDED.hour_of_day,
+                    day_of_week = EXCLUDED.day_of_week,
+                    congestion_index = EXCLUDED.congestion_index,
+                    jam_level = EXCLUDED.jam_level,
+                    road_closure = EXCLUDED.road_closure,
+                    raw_payload = EXCLUDED.raw_payload,
+                    raw_ttl_expires_at = EXCLUDED.raw_ttl_expires_at
                 RETURNING id
             )
             SELECT id FROM inserted
         """),
         {
             "observed_at": candidate.observed_at,
+            "observed_at_hour": observed_at_hour,
             "source_kind": candidate.source_kind,
             "source_ref": candidate.source_ref,
             "wkt": candidate.geometry_wkt,
             "city": candidate.city,
             "speed_kmph": candidate.speed_kmph,
             "free_flow_speed_kmph": candidate.free_flow_speed_kmph,
+            "speed_ratio": speed_ratio,
             "travel_time_seconds": candidate.travel_time_seconds,
             "free_flow_travel_time_seconds": candidate.free_flow_travel_time_seconds,
             "confidence": candidate.confidence,
+            "hour_of_day": hour_of_day,
+            "day_of_week": day_of_week,
             "congestion_index": candidate.congestion_index,
             "jam_level": candidate.jam_level,
             "road_closure": candidate.road_closure,
@@ -576,17 +678,17 @@ def _expire_raw_payloads(db, now: datetime) -> None:
 
 
 def ingest_city(
-    client: TomTomClient,
     city: str,
+    city_scope: CityScope,
     mode: str,
     observed_at: datetime,
+    budget: DailyTileBudget,
     *,
     finalize_city: bool = True,
+    max_tiles_per_city: int | None = None,
 ) -> dict[str, int]:
-    if city not in SUPPORTED_CITIES:
-        raise ValueError(f"Unsupported city '{city}'. Supported: {', '.join(SUPPORTED_CITIES)}")
-
     db = SessionLocal()
+    client = TomTomClient()
     run_id = uuid.uuid4().hex[:10]
     started_at = datetime.now(timezone.utc).replace(tzinfo=None)
     tile_requests = 0
@@ -594,13 +696,11 @@ def ingest_city(
     observations_skipped = 0
     hotspots_updated = 0
     try:
-        tile_used, _ = _quota_used_today(db)
-        tile_limit = int(os.getenv("TOMTOM_TILE_DAILY_LIMIT", "45000"))
         raw_retention_days = int(os.getenv("TOMTOM_RAW_RETENTION_DAYS", "7"))
         threshold = float(os.getenv("TOMTOM_CONGESTION_THRESHOLD", "0.35"))
         include_baseline = mode == "baseline"
         zoom = int(os.getenv("TOMTOM_DISCOVERY_ZOOM", "12"))
-        bboxes = [SUPPORTED_CITIES[city]["bbox"]]
+        bboxes = [city_scope.bbox]
         if mode == "tracking":
             zoom = int(os.getenv("TOMTOM_HOTSPOT_ZOOM", "13"))
             bboxes = _active_hotspot_bboxes(db, city) or []
@@ -608,7 +708,7 @@ def ingest_city(
         # fall back to a small discovery scan so we start collecting observations.
         if not bboxes and mode == "tracking" and os.getenv("TOMTOM_TRACKING_BOOTSTRAP_DISCOVERY", "true").lower() in {"1", "true", "yes", "on"}:
             zoom = int(os.getenv("TOMTOM_DISCOVERY_ZOOM", "12"))
-            bboxes = [SUPPORTED_CITIES[city]["bbox"]]
+            bboxes = [city_scope.bbox]
         if not bboxes:
             _record_run(
                 db,
@@ -629,9 +729,9 @@ def ingest_city(
 
         ttl = observed_at + timedelta(days=raw_retention_days)
         for bbox in bboxes:
-            tiles = tiles_for_bbox(bbox, zoom)
+            tiles = tiles_for_bbox(bbox, zoom, max_tiles=max_tiles_per_city)
             for tile in tiles:
-                if tile_used + tile_requests >= tile_limit:
+                if not budget.try_consume():
                     raise RuntimeError("TomTom tile daily limit reached")
                 payload = client.fetch_flow_tile(tile)
                 tile_requests += 1
@@ -708,6 +808,104 @@ def ingest_city(
         db.close()
 
 
+def finalize_city_ingestion(city: str, observed_at: datetime) -> None:
+    db = SessionLocal()
+    try:
+        _refresh_daily_stats(db, city, observed_at.date())
+        _expire_raw_payloads(db, observed_at)
+        db.commit()
+        try:
+            generated_tiles = pregenerate_traffic_tiles_for_observations(db, city=city, observed_at=observed_at)
+            if generated_tiles:
+                log.info("Pre-generated %s traffic tiles for %s at %s", generated_tiles, city, observed_at.isoformat())
+        except Exception as exc:
+            db.rollback()
+            log.warning("Traffic tile pregeneration failed for %s at %s: %s", city, observed_at.isoformat(), exc)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def run_ingestion(
+    *,
+    cities: list[str] | None = None,
+    mode: str = "auto",
+    observed_at: datetime | None = None,
+    max_tiles_per_city: int | None = None,
+) -> dict[str, int]:
+    Base.metadata.create_all(bind=engine)
+    bootstrap_database()
+    observed_at = observed_at or datetime.now(timezone.utc).replace(tzinfo=None)
+    modes = modes_for_now(datetime.now(IST)) if mode == "auto" else [mode]
+    if not modes:
+        log.info("No ingestion mode due at this hour.")
+        return {"tile_requests": 0, "observations_saved": 0, "observations_skipped": 0, "hotspots_updated": 0}
+
+    db = SessionLocal()
+    try:
+        city_scopes = load_city_scopes(db)
+        tile_used, _ = _quota_used_today(db)
+    finally:
+        db.close()
+
+    if not city_scopes:
+        raise RuntimeError("No road_segments city scopes found; ingest cannot determine discovery areas.")
+
+    selected_cities = [_normalize_city_name(city) for city in (cities or list(city_scopes.keys()))]
+    invalid_cities = [city for city in selected_cities if city not in city_scopes]
+    if invalid_cities:
+        raise ValueError(
+            f"Unsupported city selection: {', '.join(sorted(invalid_cities))}. "
+            f"Available cities: {', '.join(sorted(city_scopes))}"
+        )
+
+    budget = DailyTileBudget(
+        used=tile_used,
+        limit=int(os.getenv("TOMTOM_TILE_DAILY_LIMIT", "45000")),
+    )
+    max_workers = max(1, int(os.getenv("TOMTOM_MAX_CITY_WORKERS", "5")))
+    totals = {"tile_requests": 0, "observations_saved": 0, "observations_skipped": 0, "hotspots_updated": 0}
+    successful_cities: set[str] = set()
+
+    for current_mode in modes:
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(selected_cities))) as executor:
+            future_map = {
+                executor.submit(
+                    ingest_city,
+                    city,
+                    city_scopes[city],
+                    current_mode,
+                    observed_at,
+                    budget,
+                    finalize_city=False,
+                    max_tiles_per_city=max_tiles_per_city,
+                ): city
+                for city in selected_cities
+            }
+            for future in as_completed(future_map):
+                city = future_map[future]
+                log.info("Ingesting %s traffic for %s", current_mode, city)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    log.error("TomTom ingestion failed for %s/%s: %s", city, current_mode, exc)
+                    continue
+                successful_cities.add(city)
+                for key, value in result.items():
+                    totals[key] += value
+
+    for city in sorted(successful_cities):
+        try:
+            finalize_city_ingestion(city, observed_at)
+        except Exception as exc:
+            log.error("Daily hotspot stats refresh failed for %s: %s", city, exc)
+
+    log.info("TomTom ingestion complete: %s", json.dumps(totals, sort_keys=True))
+    return totals
+
+
 def modes_for_now(now: datetime) -> list[str]:
     modes: list[str] = []
     if _is_peak(now):
@@ -722,56 +920,9 @@ def modes_for_now(now: datetime) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest TomTom hotspot-first traffic observations.")
     parser.add_argument("--mode", choices=["auto", "discovery", "tracking", "baseline"], default="auto")
-    parser.add_argument("--city", action="append", choices=sorted(SUPPORTED_CITIES.keys()))
+    parser.add_argument("--city", action="append")
     args = parser.parse_args()
-
-    Base.metadata.create_all(bind=engine)
-    ensure_performance_indexes()
-    observed_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    modes = modes_for_now(datetime.now(IST)) if args.mode == "auto" else [args.mode]
-    if not modes:
-        log.info("No ingestion mode due at this hour.")
-        return
-
-    client = TomTomClient()
-    cities = args.city or list(SUPPORTED_CITIES.keys())
-    totals = {"tile_requests": 0, "observations_saved": 0, "observations_skipped": 0, "hotspots_updated": 0}
-    for city in cities:
-        city_had_success = False
-        for mode in modes:
-            log.info("Ingesting %s traffic for %s", mode, city)
-            try:
-                result = ingest_city(client, city, mode, observed_at, finalize_city=False)
-            except Exception as exc:
-                log.error("TomTom ingestion failed for %s/%s: %s", city, mode, exc)
-                continue
-            city_had_success = True
-            for key, value in result.items():
-                totals[key] += value
-        if city_had_success:
-            db = SessionLocal()
-            try:
-                _refresh_daily_stats(db, city, observed_at.date())
-                _expire_raw_payloads(db, observed_at)
-                db.commit()
-                try:
-                    generated_tiles = pregenerate_traffic_tiles_for_observations(db, city=city, observed_at=observed_at)
-                    if generated_tiles:
-                        log.info(
-                            "Pre-generated %s traffic tiles for %s at %s",
-                            generated_tiles,
-                            city,
-                            observed_at.isoformat(),
-                        )
-                except Exception as exc:
-                    db.rollback()
-                    log.warning("Traffic tile pregeneration failed for %s at %s: %s", city, observed_at.isoformat(), exc)
-            except Exception as exc:
-                db.rollback()
-                log.error("Daily hotspot stats refresh failed for %s: %s", city, exc)
-            finally:
-                db.close()
-    log.info("TomTom ingestion complete: %s", json.dumps(totals, sort_keys=True))
+    run_ingestion(cities=args.city, mode=args.mode)
 
 
 if __name__ == "__main__":

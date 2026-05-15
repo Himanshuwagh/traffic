@@ -54,17 +54,20 @@ The frontend is a React app built with Vite.
 
 ---
 
-### 4. Hourly Updates (GitHub Actions)
-To keep the traffic data fresh, GitHub Actions runs the TomTom hotspot-first ingestion job every hour.
+### 4. Hourly Updates (Railway Worker)
+To keep the traffic data fresh, run the TomTom hotspot-first ingestion job in a dedicated Railway worker.
 
-1.  In your GitHub repo, go to **Settings** -> **Secrets and variables** -> **Actions**.
-2.  Add two **Repository secrets**:
+1.  Create a Railway service from this repo using `railway.toml`.
+2.  Set these environment variables:
     *   `DATABASE_URL`: Same as Step 1.
     *   `TOMTOM_API_KEY`: Your TomTom API key.
-3.  The workflow is already set up in `.github/workflows/traffic-ingestion.yml`. It runs automatically every hour and only ingests when a discovery, tracking, or baseline window is due.
+    *   `TOMTOM_MAX_CITY_WORKERS`: `5` is the default concurrency cap.
+    *   `TOMTOM_SCHEDULER_MINUTE`: `0` to run at the top of each hour.
+    *   `TOMTOM_SCHEDULER_TIMEZONE`: `UTC` unless you need a different scheduler timezone.
+3.  The Railway worker runs `python railway_scheduler.py`, which uses APScheduler with `max_instances=1`, `coalesce=True`, and `misfire_grace_time=300` to avoid overlapping ingestion runs.
 
 The ingestion schedule is:
-*   Discovery: peak hours only, hourly per supported city.
+*   Discovery: peak hours only, hourly per DB-backed city.
 *   Tracking: active hotspot boxes every 3 hours.
 *   Baseline: off-peak samples at 13:00 and 22:00 IST.
 
@@ -78,7 +81,7 @@ If you already have road segments and signals data in your Supabase DB, **you do
 The app is designed to:
 1.  **Read** from your existing road geometry tables.
 2.  **Update** normalized TomTom traffic observations hourly only when scheduled.
-3.  **Serve past date/time map views** from stored `traffic_observations`, not live provider calls.
+3.  **Serve past date/time map views** and hourly history from stored `traffic_observations`, not live provider calls.
 
 **Do not run** `python fetch_segments.py`, `python fetch_signals.py`, or `python fetch_india_districts.py` if your database is already populated. These are static reference imports and are not required for recurring TomTom traffic ingestion.
 

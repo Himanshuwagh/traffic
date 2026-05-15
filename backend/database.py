@@ -34,6 +34,111 @@ def should_ensure_performance_indexes() -> bool:
     return _env_flag("AUTO_CREATE_INDEXES", default=False)
 
 
+def _execute_transactional_statements(statements: list[str]) -> None:
+    for statement in statements:
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(statement))
+        except SQLAlchemyError as exc:
+            logger.warning("Failed to execute transactional schema statement: %s | sql=%s", exc, statement)
+
+
+def _execute_autocommit_statements(statements: list[str]) -> None:
+    for statement in statements:
+        try:
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                conn.execute(text(statement))
+        except SQLAlchemyError as exc:
+            logger.warning("Failed to execute autocommit schema statement: %s | sql=%s", exc, statement)
+
+
+def ensure_traffic_observation_schema():
+    tx_statements = [
+        "ALTER TABLE traffic_observations ADD COLUMN IF NOT EXISTS observed_at_hour TIMESTAMP",
+        "ALTER TABLE traffic_observations ADD COLUMN IF NOT EXISTS speed_ratio DOUBLE PRECISION",
+        "ALTER TABLE traffic_observations ADD COLUMN IF NOT EXISTS hour_of_day SMALLINT",
+        "ALTER TABLE traffic_observations ADD COLUMN IF NOT EXISTS day_of_week SMALLINT",
+        """
+        UPDATE traffic_observations
+        SET
+            observed_at_hour = DATE_TRUNC('hour', observed_at),
+            speed_ratio = CASE
+                WHEN free_flow_speed_kmph IS NOT NULL AND free_flow_speed_kmph > 0 AND speed_kmph IS NOT NULL
+                    THEN GREATEST(0.0, LEAST(1.0, speed_kmph / free_flow_speed_kmph))
+                ELSE NULL
+            END,
+            hour_of_day = EXTRACT(HOUR FROM observed_at)::smallint,
+            day_of_week = (EXTRACT(ISODOW FROM observed_at)::int - 1)::smallint
+        WHERE observed_at IS NOT NULL
+          AND (
+              observed_at_hour IS NULL
+              OR hour_of_day IS NULL
+              OR day_of_week IS NULL
+              OR (
+                  free_flow_speed_kmph IS NOT NULL
+                  AND free_flow_speed_kmph > 0
+                  AND speed_kmph IS NOT NULL
+                  AND speed_ratio IS NULL
+              )
+          )
+        """,
+        """
+        DELETE FROM traffic_observations stale
+        USING (
+            SELECT id
+            FROM (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY source, source_ref
+                        ORDER BY observed_at DESC NULLS LAST, id DESC
+                    ) AS rn
+                FROM traffic_observations
+                WHERE source IS NOT NULL
+                  AND source_ref IS NOT NULL
+            ) ranked
+            WHERE ranked.rn > 1
+        ) dupes
+        WHERE stale.id = dupes.id
+        """,
+        """
+        DELETE FROM traffic_observations stale
+        USING (
+            SELECT id
+            FROM (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY road_segment_id, observed_at_hour
+                        ORDER BY observed_at DESC NULLS LAST, id DESC
+                    ) AS rn
+                FROM traffic_observations
+                WHERE source = 'tomtom'
+                  AND road_segment_id IS NOT NULL
+                  AND observed_at_hour IS NOT NULL
+            ) ranked
+            WHERE ranked.rn > 1
+        ) dupes
+        WHERE stale.id = dupes.id
+        """,
+        "ALTER TABLE traffic_observations ALTER COLUMN observed_at_hour SET NOT NULL",
+        "ALTER TABLE traffic_observations ALTER COLUMN hour_of_day SET NOT NULL",
+        "ALTER TABLE traffic_observations ALTER COLUMN day_of_week SET NOT NULL",
+    ]
+    concurrent_statements = [
+        "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_traffic_observations_source_ref ON traffic_observations (source, source_ref)",
+        """
+        CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_traffic_observations_segment_hour
+        ON traffic_observations (road_segment_id, observed_at_hour)
+        WHERE road_segment_id IS NOT NULL AND source = 'tomtom'
+        """,
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_traffic_observations_observed_hour ON traffic_observations (observed_at_hour)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_traffic_observations_city_hour ON traffic_observations (LOWER(city), observed_at_hour)",
+    ]
+    _execute_transactional_statements(tx_statements)
+    _execute_autocommit_statements(concurrent_statements)
+
+
 def ensure_performance_indexes():
     # Split heavy index statements that must run CONCURRENTLY from the
     # lightweight statements that can run inside a transaction.
@@ -59,6 +164,7 @@ def ensure_performance_indexes():
         # Date-only index for any remaining range scans
         "CREATE INDEX IF NOT EXISTS idx_traffic_data_date ON traffic_data (date)",
         "CREATE INDEX IF NOT EXISTS idx_traffic_observations_city_time ON traffic_observations (LOWER(city), observed_at)",
+        "CREATE INDEX IF NOT EXISTS idx_traffic_observations_city_hour_day ON traffic_observations (LOWER(city), observed_at_hour, hour_of_day)",
         "CREATE INDEX IF NOT EXISTS idx_traffic_observations_city_time_congested ON traffic_observations (LOWER(city), observed_at) WHERE congestion_index IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS idx_traffic_observations_road_time ON traffic_observations (road_segment_id, observed_at)",
         "CREATE INDEX IF NOT EXISTS idx_traffic_observations_jam_time ON traffic_observations (jam_level, observed_at)",
@@ -77,22 +183,16 @@ def ensure_performance_indexes():
 
     # Run the lightweight index statements individually so a timeout on one
     # index does not prevent the application from starting.
-    for statement in tx_statements:
-        try:
-            with engine.begin() as connection:
-                connection.execute(text(statement))
-        except SQLAlchemyError as exc:
-            logger.warning("Failed to create transactional index during startup: %s | sql=%s", exc, statement)
+    _execute_transactional_statements(tx_statements)
 
     # Run the concurrent statements outside a transaction (Postgres requires
     # CONCURRENTLY to not be executed inside a transaction block).
-    for statement in concurrent_statements:
-        try:
-            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-                conn.execute(text(statement))
-        except SQLAlchemyError as exc:
-            # Log a warning but don't fail the entire startup.
-            logger.warning("Failed to create concurrent index during startup: %s | sql=%s", exc, statement)
+    _execute_autocommit_statements(concurrent_statements)
+
+
+def bootstrap_database():
+    ensure_traffic_observation_schema()
+    ensure_performance_indexes()
 
 def get_db():
     db = SessionLocal()

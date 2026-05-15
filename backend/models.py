@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, Index, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, Index, Integer, LargeBinary, SmallInteger, String, Text, UniqueConstraint
 from geoalchemy2 import Geometry
 try:
     from .database import Base
@@ -28,9 +28,13 @@ class TrafficData(Base):
 
 class TrafficObservation(Base):
     __tablename__ = "traffic_observations"
+    __table_args__ = (
+        UniqueConstraint("source", "source_ref", name="uq_traffic_observations_source_ref"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     observed_at = Column(DateTime, index=True)
+    observed_at_hour = Column(DateTime, nullable=False, index=True)
     source = Column(String, nullable=False, index=True)
     source_kind = Column(String, nullable=False, index=True)
     source_ref = Column(String, nullable=True, index=True)
@@ -39,8 +43,11 @@ class TrafficObservation(Base):
     city = Column(String, nullable=True, index=True)
     speed_kmph = Column(Float, nullable=True)
     free_flow_speed_kmph = Column(Float, nullable=True)
+    speed_ratio = Column(Float, nullable=True)
     travel_time_seconds = Column(Float, nullable=True)
     free_flow_travel_time_seconds = Column(Float, nullable=True)
+    hour_of_day = Column(SmallInteger, nullable=False, index=True)
+    day_of_week = Column(SmallInteger, nullable=False, index=True)
     confidence = Column(Float, nullable=True)
     congestion_index = Column(Float, nullable=True, index=True)
     jam_level = Column(String, nullable=True, index=True)

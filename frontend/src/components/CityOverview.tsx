@@ -107,7 +107,7 @@ const CityOverview: React.FC<CityOverviewProps> = ({ city, summary, onSegmentCli
             <BarChart2 className="w-4 h-4 text-brand-amber" />
             <h3 className="text-sm font-semibold text-white">Avg Speed by Hour of Day</h3>
           </div>
-          <span className="text-[10px] text-gray-500">from stored traffic_data</span>
+          <span className="text-[10px] text-gray-500">from stored traffic observations</span>
         </div>
 
         {loadingChart ? (

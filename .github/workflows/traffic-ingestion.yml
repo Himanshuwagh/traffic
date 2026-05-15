@@ -1,9 +1,7 @@
-name: Hourly TomTom Traffic Ingestion
+name: Manual TomTom Traffic Ingestion
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 * * * *"
 
 concurrency:
   group: traffic-ingestion

@@ -90,7 +90,7 @@ const LiveTrafficPanel: React.FC<LiveTrafficPanelProps> = ({ cityId, onFetchComp
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <Zap className="w-4 h-4 text-brand-amber" />
-          <h3 className="text-sm font-semibold text-white">Live Traffic Fetch</h3>
+          <h3 className="text-sm font-semibold text-white">Manual Traffic Ingest</h3>
         </div>
         <span className="text-[10px] text-gray-500 bg-brand-bg px-2 py-0.5 rounded-full border border-brand-border">
           TomTom API
@@ -105,7 +105,7 @@ const LiveTrafficPanel: React.FC<LiveTrafficPanelProps> = ({ cityId, onFetchComp
             <p className="text-lg font-bold text-white">{Number(dbStats.total_records).toLocaleString()}</p>
           </div>
           <div className="bg-brand-bg rounded-lg p-3 border border-brand-border">
-            <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Segments tracked</p>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Segments observed</p>
             <p className="text-lg font-bold text-white">{Number(dbStats.unique_segments).toLocaleString()}</p>
           </div>
           <div className="bg-brand-bg rounded-lg p-3 border border-brand-border">
@@ -135,7 +135,7 @@ const LiveTrafficPanel: React.FC<LiveTrafficPanelProps> = ({ cityId, onFetchComp
       <div className="flex items-center gap-3 mb-3">
         <div className="flex-1">
           <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">
-            Segments to fetch
+            Request size
           </label>
           <select
             value={segmentLimit}
@@ -143,10 +143,10 @@ const LiveTrafficPanel: React.FC<LiveTrafficPanelProps> = ({ cityId, onFetchComp
             disabled={isFetching}
             className="w-full bg-brand-bg border border-brand-border text-white text-sm rounded-lg p-2 outline-none focus:border-brand-amber cursor-pointer disabled:opacity-50"
           >
-            <option value={25}>25 segments (~30s)</option>
-            <option value={50}>50 segments (~1m)</option>
-            <option value={100}>100 segments (~2m)</option>
-            <option value={200}>200 segments (~4m)</option>
+            <option value={25}>Small ingest</option>
+            <option value={50}>Medium ingest</option>
+            <option value={100}>Large ingest</option>
+            <option value={200}>Extended ingest</option>
           </select>
         </div>
         <button
@@ -163,7 +163,7 @@ const LiveTrafficPanel: React.FC<LiveTrafficPanelProps> = ({ cityId, onFetchComp
       {isFetching && (
         <div className="flex items-center gap-2 text-sm text-gray-400 mt-2">
           <RefreshCw className="w-3.5 h-3.5 animate-spin text-brand-amber" />
-          Calling TomTom API for each road segment midpoint…
+          Running TomTom discovery ingest for this city…
         </div>
       )}
 
@@ -171,9 +171,9 @@ const LiveTrafficPanel: React.FC<LiveTrafficPanelProps> = ({ cityId, onFetchComp
         <div className="flex items-start gap-2 mt-2 text-sm bg-green-900/20 border border-green-800/40 rounded-lg p-3">
           <CheckCircle className="w-4 h-4 text-green-400 shrink-0 mt-0.5" />
           <div>
-            <p className="text-green-300 font-medium">Fetch complete</p>
+            <p className="text-green-300 font-medium">Ingest complete</p>
             <p className="text-green-400/80 text-xs mt-0.5">
-              {lastFetch.fetched} segments stored &bull; {lastFetch.failed} failed
+              {lastFetch.fetched} observations stored &bull; {lastFetch.failed} failed
               {lastFetch.skipped ? ` · ${lastFetch.skipped} skipped` : ''}
             </p>
           </div>

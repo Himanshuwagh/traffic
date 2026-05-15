@@ -3,17 +3,13 @@ builder        = "DOCKERFILE"
 dockerfilePath = "Dockerfile.fetcher"
 
 [deploy]
-# Major-city batch job — fetches the curated India city list from
-# `backend/fetch_all_india.py` instead of importing every district.
-#
+# Persistent TomTom ingestion worker.
 # Useful env vars:
-#   WAIT_MINUTES=2
-#   CITY_NAME="Pune, India"   (only if you later switch to fetch_segments.py manually)
-#
-# This path is much smaller than the district-wide import and is the safer fit
-# for Railway + Supabase free-tier storage constraints.
-startCommand      = "python fetch_all_india.py"
-# One-shot batch job — never restart after the script finishes.
-restartPolicyType = "NEVER"
+#   TOMTOM_SCHEDULER_MINUTE=0
+#   TOMTOM_SCHEDULER_TIMEZONE=UTC
+#   TOMTOM_MAX_CITY_WORKERS=5
+startCommand      = "python railway_scheduler.py"
+# Long-lived worker — keep the scheduler process running.
+restartPolicyType = "ON_FAILURE"
 # No healthcheck — this is not an HTTP server.
 healthcheckPath   = ""
